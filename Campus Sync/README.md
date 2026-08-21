@@ -3,7 +3,7 @@
 ---
 
 ## 🚀 Live Working Demo
-- ** Project Link - 
+- ** Project Link - https://campus-sync-ashy.vercel.app/
 
 ---
 
