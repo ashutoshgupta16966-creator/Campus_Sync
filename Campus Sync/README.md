@@ -1,7 +1,5 @@
 # 🎓 CampusSync — AI-Powered Student Workspace
 
-> **Note:** This repository is kept private for security and proprietary code protection. Below is the complete architecture, feature set, and functional overview of the application.
-
 ---
 
 ## 🚀 Live Working Demo
