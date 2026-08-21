@@ -1,29 +1,43 @@
-# Welcome to your Lovable project
+# 🎓 CampusSync — AI-Powered Student Workspace
 
-This project was built with [Lovable](https://lovable.dev).
+> **Note:** This repository is kept private for security and proprietary code protection. Below is the complete architecture, feature set, and functional overview of the application.
 
-## Build with Lovable
+---
 
-Open your project in the [Lovable editor](https://lovable.dev) and keep building.
+## 🚀 Live Working Demo
+- ** Project Link - 
 
-- **Ship faster**: describe what you want to build and Lovable handles the code.
-- **Stay in sync**: connect the project to GitHub and every change made in Lovable is committed straight to your repository.
-- **Full ownership**: this code is yours. Push to your repository and your changes sync back into Lovable, ready for your next prompt.
+---
 
-## Development
+## 📌 Project Overview
+**CampusSync** is a unified, all-in-one AI platform designed to eliminate fragmented student workflows. It solves core campus productivity challenges through three key modules:
 
-Prefer working locally? You need Node.js and npm — [install with nvm](https://github.com/nvm-sh/nvm#installing-and-updating).
+1. **AI Study Notes Summarizer:** Converts lengthy lecture transcripts and notes (text/files) into instant exam-ready summary cards, key formulas, and practice questions.
+2. **Peer & Hackathon Teammate Matcher:** An interactive grid enabling students to find project squad members filtering by specific technical skills and availability.
+3. **Dynamic ATS Resume Checker:** Evaluates resumes dynamically against real-world job roles, generating real-time ATS compliance scores (0-100), missing technical keywords, and actionable format feedback.
 
-```sh
-git clone <this-repository-url>
-cd <repository-name>
-npm i
-npm run dev
-```
+---
 
-## Built with
+## 🛠️ Tech Stack
+- **Frontend Framework:** React.js + TypeScript
+- **Bundler & Build Tool:** Vite
+- **Styling & UI:** Tailwind CSS, Lucide Icons, Shadcn UI
+- **State & Logic:** Custom React Hooks + Context API
+- **Deployment Platform:** Lovable / Edge Hosting
 
-- TanStack Start
-- TypeScript
-- React
-- Tailwind CSS
+---
+
+## 📁 Repository Structure
+```text
+CampusSync/
+├── public/                 # Static media assets & icons
+├── src/
+│   ├── components/         # Modular UI components (ATS, Summarizer, Matcher)
+│   ├── hooks/              # Custom React logic hooks
+│   ├── pages/              # Main route views
+│   ├── index.css           # Global Tailwind styling rules
+│   └── App.tsx             # Main Application Routing
+├── index.html              # HTML Root Template
+├── package.json            # Project Dependencies & Scripts
+├── tsconfig.json           # TypeScript Engine Configuration
+└── vite.config.ts          # Vite Configuration
