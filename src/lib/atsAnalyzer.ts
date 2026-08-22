@@ -1,6 +1,7 @@
 export interface AtsAnalysisResult {
   score: number;
   wordCount: number;
+  extractedText: string;
   detectedKeywords: string[];
   missingKeywords: string[];
   detectedSections: string[];
@@ -9,56 +10,85 @@ export interface AtsAnalysisResult {
   recommendations: string[];
 }
 
-const TECH_KEYWORDS = [
-  "React",
-  "TypeScript",
+// Target Industry Keywords (Technical & Soft Skills)
+const TARGET_KEYWORDS = [
+  // Languages
   "JavaScript",
+  "TypeScript",
   "Python",
   "Java",
   "C++",
+  "C#",
+  "Go",
+  "Rust",
+  "HTML",
+  "CSS",
+  "SQL",
+
+  // Frameworks & Libraries
+  "React",
+  "Next.js",
   "Node.js",
   "Express",
-  "Next.js",
-  "SQL",
+  "Vue",
+  "Angular",
+  "Django",
+  "FastAPI",
+  "Tailwind",
+  "Redux",
+  "Bootstrap",
+
+  // Databases & Cloud
   "PostgreSQL",
   "MongoDB",
+  "MySQL",
   "Redis",
+  "Firebase",
   "AWS",
+  "GCP",
+  "Azure",
   "Docker",
   "Kubernetes",
+
+  // Developer Tools & Practices
   "Git",
+  "GitHub",
   "CI/CD",
   "REST APIs",
   "GraphQL",
   "System Design",
-  "Data Structures",
-  "Algorithms",
+  "Microservices",
+  "Agile/Scrum",
+  "Linux",
   "Unit Testing",
   "Jest",
-  "Agile/Scrum",
-  "HTML",
-  "CSS",
-  "Tailwind",
-  "Redux",
-  "Linux",
-  "Microservices",
   "Figma",
   "UI/UX",
+  "Data Structures",
+  "Algorithms",
+
+  // Soft Skills
+  "Problem Solving",
+  "Communication",
+  "Leadership",
+  "Teamwork",
+  "Collaboration",
 ];
 
 const STANDARD_SECTIONS = [
-  { name: "Professional Summary", keys: ["summary", "profile", "objective", "about"] },
-  { name: "Work Experience / Internships", keys: ["experience", "employment", "internship", "history", "work"] },
-  { name: "Projects", keys: ["project", "projects", "open source", "portfolio"] },
-  { name: "Education", keys: ["education", "academic", "university", "college", "degree", "b.tech", "bachelor"] },
-  { name: "Technical Skills", keys: ["skills", "technologies", "competencies", "tools", "stack"] },
-  { name: "Certifications & Links", keys: ["certif", "credentials", "github", "linkedin", "courses", "achievements"] },
+  { name: "Contact Information", keys: ["email", "phone", "mobile", "linkedin", "github", "contact", "@"] },
+  { name: "Professional Summary", keys: ["summary", "profile", "objective", "about me", "about"] },
+  { name: "Work Experience / Internships", keys: ["experience", "employment", "internship", "work history", "history", "position", "work"] },
+  { name: "Projects", keys: ["project", "projects", "open source", "portfolio", "key projects"] },
+  { name: "Education", keys: ["education", "academic", "university", "college", "degree", "b.tech", "bachelor", "master", "gpa", "cgpa"] },
+  { name: "Technical Skills", keys: ["skills", "technologies", "competencies", "tools", "stack", "technical skills"] },
+  { name: "Certifications & Achievements", keys: ["certif", "credentials", "courses", "achievements", "awards", "licenses"] },
 ];
 
 const ACTION_VERBS = [
   "developed", "built", "designed", "implemented", "spearheaded", "architected",
   "optimized", "increased", "decreased", "reduced", "led", "created", "automated",
-  "integrated", "engineered", "scaled", "improved", "launched", "refactored"
+  "integrated", "engineered", "scaled", "improved", "launched", "refactored", "managed"
 ];
 
 export function analyzeResumeText(text: string): AtsAnalysisResult {
@@ -66,8 +96,9 @@ export function analyzeResumeText(text: string): AtsAnalysisResult {
     return {
       score: 0,
       wordCount: 0,
+      extractedText: "",
       detectedKeywords: [],
-      missingKeywords: TECH_KEYWORDS.slice(0, 6),
+      missingKeywords: TARGET_KEYWORDS.slice(0, 10),
       detectedSections: [],
       missingSections: STANDARD_SECTIONS.map((s) => s.name),
       strengths: ["Upload a detailed resume file to evaluate ATS performance."],
@@ -80,13 +111,13 @@ export function analyzeResumeText(text: string): AtsAnalysisResult {
   const words = cleanText.split(/\s+/).filter(Boolean);
   const wordCount = words.length;
 
-  // 1. Keyword Matching
+  // 1. Dynamic Keyword Detection (Case-insensitive)
   const detectedKeywords: string[] = [];
   const missingKeywords: string[] = [];
 
-  TECH_KEYWORDS.forEach((kw) => {
-    // Regex for keyword match with word boundaries
+  TARGET_KEYWORDS.forEach((kw) => {
     const escaped = kw.replace(/[-/\\^$*+?.()|[\]{}]/g, "\\$&");
+    // Word boundary regex allowing for special chars like C++, C#, Node.js
     const regex = new RegExp(`(?:^|\\b|\\W)${escaped}(?:$|\\b|\\W)`, "i");
     if (regex.test(cleanText)) {
       detectedKeywords.push(kw);
@@ -95,7 +126,7 @@ export function analyzeResumeText(text: string): AtsAnalysisResult {
     }
   });
 
-  // 2. Section Detection
+  // 2. Dynamic Section Detection
   const detectedSections: string[] = [];
   const missingSections: string[] = [];
 
@@ -108,85 +139,85 @@ export function analyzeResumeText(text: string): AtsAnalysisResult {
     }
   });
 
-  // 3. Metrics & Action Verbs Detection
+  // 3. Dynamic Quantified Impact & Action Verbs
   const metricsMatches = (cleanText.match(/\b\d+(?:[\.,]\d+)?%|\$\d+|\b\d+\+|\b\d+x\b|₹\d+|\b\d+\s*(?:ms|sec|users|customers|clients|projects|kb|mb|gb|tb|hrs)\b/gi) || []);
   const actionVerbsFound = ACTION_VERBS.filter((verb) => lowerText.includes(verb));
 
-  // 4. Scoring Algorithm (0-100)
-  // a) Keyword Score (Max 35)
-  const keywordRatio = Math.min(detectedKeywords.length / 10, 1);
-  const keywordScore = Math.round(keywordRatio * 35);
+  // 4. Dynamic ATS Score Calculation (0-100)
+  // a) Keyword Match Score (Max 40 points)
+  // Target benchmark: finding 12+ keywords gets full 40 points
+  const keywordTarget = Math.min(detectedKeywords.length / 12, 1);
+  const keywordScore = Math.round(keywordTarget * 40);
 
-  // b) Section Score (Max 25)
+  // b) Section Completeness Score (Max 30 points)
   const sectionRatio = detectedSections.length / STANDARD_SECTIONS.length;
-  const sectionScore = Math.round(sectionRatio * 25);
+  const sectionScore = Math.round(sectionRatio * 30);
 
-  // c) Metrics & Impact Score (Max 20)
-  const metricsPoints = Math.min(metricsMatches.length * 4, 12);
-  const verbPoints = Math.min(actionVerbsFound.length * 2, 8);
-  const impactScore = metricsPoints + verbPoints;
-
-  // d) Word Count & Format Score (Max 20)
-  let formatScore = 0;
-  if (wordCount >= 200 && wordCount <= 900) {
-    formatScore = 20;
-  } else if (wordCount >= 100 && wordCount < 200) {
-    formatScore = 12;
-  } else if (wordCount > 900 && wordCount <= 1500) {
-    formatScore = 14;
+  // c) Word Count Appropriateness (Max 15 points)
+  let wordCountScore = 0;
+  if (wordCount >= 250 && wordCount <= 900) {
+    wordCountScore = 15; // Optimal single page length
+  } else if (wordCount >= 150 && wordCount < 250) {
+    wordCountScore = 10;
+  } else if (wordCount > 900 && wordCount <= 1400) {
+    wordCountScore = 10; // Acceptable 2-page length
   } else {
-    formatScore = 5;
+    wordCountScore = 5; // Too brief or overly long
   }
 
-  const totalScore = Math.min(Math.max(keywordScore + sectionScore + impactScore + formatScore, 0), 100);
+  // d) Quantified Metrics & Action Verbs (Max 15 points)
+  const metricsPoints = Math.min(metricsMatches.length * 3, 9);
+  const verbPoints = Math.min(actionVerbsFound.length * 2, 6);
+  const impactScore = metricsPoints + verbPoints;
 
-  // 5. Generate Dynamic Strengths
+  const totalScore = Math.min(100, Math.max(0, keywordScore + sectionScore + wordCountScore + impactScore));
+
+  // 5. Dynamic Strengths Found
   const strengths: string[] = [];
 
   if (detectedKeywords.length > 0) {
-    strengths.push(`Matches ${detectedKeywords.length} core technical keywords (${detectedKeywords.slice(0, 5).join(", ")}${detectedKeywords.length > 5 ? "..." : ""})`);
+    strengths.push(`Detected ${detectedKeywords.length} matching technical and soft skills (${detectedKeywords.slice(0, 6).join(", ")}${detectedKeywords.length > 6 ? "..." : ""})`);
   }
   if (detectedSections.length >= 4) {
-    strengths.push(`Contains ${detectedSections.length} essential resume sections for reliable ATS parsing`);
+    strengths.push(`Contains ${detectedSections.length} of ${STANDARD_SECTIONS.length} standard resume sections for reliable ATS parsing`);
   }
   if (metricsMatches.length > 0) {
-    strengths.push(`Includes ${metricsMatches.length} quantified impact metrics and data points`);
-  } else {
-    strengths.push("Readable text formatting parsed cleanly by the extraction engine");
+    strengths.push(`Includes ${metricsMatches.length} quantified impact metrics and measurable data points`);
   }
-  if (wordCount >= 200 && wordCount <= 900) {
+  if (wordCount >= 250 && wordCount <= 900) {
     strengths.push(`Optimal document length (${wordCount} words) suitable for single-page ATS scanning`);
   }
   if (actionVerbsFound.length > 0) {
     strengths.push(`Uses strong action verbs (${actionVerbsFound.slice(0, 4).join(", ")})`);
   }
 
-  // 6. Generate Dynamic Recommendations
+  // 6. Dynamic Actionable Recommendations
   const recommendations: string[] = [];
 
   if (missingKeywords.length > 0) {
-    const suggested = missingKeywords.slice(0, 4).join(", ");
-    recommendations.push(`Incorporate key industry skills like ${suggested} into your skills block.`);
+    const suggested = missingKeywords.slice(0, 5).join(", ");
+    recommendations.push(`Add target technical skills like ${suggested} to improve keyword match density.`);
   }
 
   if (metricsMatches.length < 3) {
-    recommendations.push("Quantify your project and work achievements with specific metrics (e.g. %, users, latency, volume).");
+    recommendations.push("Quantify your project and work achievements with specific numbers, percentages, or scale metrics.");
   }
 
   if (missingSections.length > 0) {
-    recommendations.push(`Add missing sections: ${missingSections.slice(0, 2).join(" and ")} to ensure full ATS section coverage.`);
+    recommendations.push(`Include missing standard sections: ${missingSections.slice(0, 2).join(" and ")}.`);
   } else {
-    recommendations.push("Keep project descriptions focused on quantifiable technical impact and modern tech stacks.");
+    recommendations.push("Ensure project descriptions highlight modern tech stacks and quantifiable business outcomes.");
   }
 
   return {
     score: totalScore,
     wordCount,
+    extractedText: cleanText,
     detectedKeywords,
-    missingKeywords: missingKeywords.slice(0, 8),
+    missingKeywords,
     detectedSections,
     missingSections,
-    strengths: strengths.length > 0 ? strengths : ["Text extracted successfully."],
-    recommendations: recommendations.length > 0 ? recommendations : ["Review formatting and tailor skills to target role requirements."],
+    strengths: strengths.length > 0 ? strengths : ["Text parsed successfully."],
+    recommendations: recommendations.length > 0 ? recommendations : ["Tailor keywords and bullet points to your target job position."],
   };
 }

@@ -12,6 +12,9 @@ import {
   Sparkles,
   BarChart3,
   ShieldCheck,
+  Eye,
+  EyeOff,
+  Code2,
 } from "lucide-react";
 import { extractTextFromFile } from "@/lib/fileParser";
 import { analyzeResumeText, type AtsAnalysisResult } from "@/lib/atsAnalyzer";
@@ -56,36 +59,38 @@ export function AtsChecker() {
   const [loading, setLoading] = useState(false);
   const [parseStatus, setParseStatus] = useState("");
   const [result, setResult] = useState<AtsAnalysisResult | null>(null);
+  const [showExtractedText, setShowExtractedText] = useState(false);
   const inputRef = useRef<HTMLInputElement>(null);
 
   const handleFileSelect = (file: File) => {
     setSelectedFile(file);
     setResult(null);
+    setShowExtractedText(false);
     toast.success("File selected", { description: `${file.name} ready for analysis.` });
   };
 
   const processAnalysis = async (fileToAnalyze: File) => {
     setLoading(true);
-    setParseStatus("Reading resume file…");
+    setParseStatus("Reading PDF document text layer…");
     try {
       const extractedText = await extractTextFromFile(fileToAnalyze, (status) => {
         setParseStatus(status);
       });
 
       if (!extractedText || extractedText.trim().length < 10) {
-        throw new Error("No readable text found in the file. Please try another file.");
+        throw new Error("No readable text could be found in the PDF. Try another PDF file.");
       }
 
-      setParseStatus("Matching keywords & computing ATS score…");
+      setParseStatus("Matching technical skills & computing ATS score…");
       const analysis = analyzeResumeText(extractedText);
       setResult(analysis);
       toast.success("Analysis complete", {
-        description: `Your resume scored ${analysis.score} / 100 based on parsed text.`,
+        description: `Parsed ${analysis.wordCount} words. ATS Score: ${analysis.score} / 100.`,
       });
     } catch (err: any) {
       console.error("Resume analysis error:", err);
       toast.error("Analysis failed", {
-        description: err.message || "Could not parse text from uploaded resume.",
+        description: err.message || "Could not parse text from uploaded PDF file.",
       });
     } finally {
       setLoading(false);
@@ -143,7 +148,7 @@ export function AtsChecker() {
           {selectedFile ? <FileText className="size-7" /> : <UploadCloud className="size-7" />}
         </div>
         <p className="mt-4 font-semibold">
-          {selectedFile ? selectedFile.name : "Drag & drop your resume here"}
+          {selectedFile ? selectedFile.name : "Drag & drop your resume PDF here"}
         </p>
         <p className="mt-1 text-sm text-muted-foreground">
           {selectedFile
@@ -160,7 +165,7 @@ export function AtsChecker() {
           ) : (
             <Sparkles className="size-4" />
           )}
-          {loading ? "Analyzing File…" : selectedFile ? "Analyze Resume Now" : "Upload File to Analyze"}
+          {loading ? "Parsing & Analyzing…" : selectedFile ? "Analyze Resume Now" : "Upload File to Analyze"}
         </button>
       </div>
 
@@ -170,7 +175,7 @@ export function AtsChecker() {
           <Loader2 className="size-8 animate-spin text-primary-glow" />
           <p className="mt-4 font-medium text-foreground">{parseStatus}</p>
           <p className="mt-1 text-xs text-muted-foreground">
-            Parsing document structure, identifying technical keywords, and scanning sections…
+            Parsing PDF text layer, detecting skills, checking sections, and calculating score…
           </p>
         </div>
       )}
@@ -183,7 +188,7 @@ export function AtsChecker() {
           </div>
           <h3 className="mt-4 text-xl font-bold">No Resume Analyzed Yet</h3>
           <p className="mt-2 max-w-md text-sm text-muted-foreground">
-            Upload your resume file (PDF, DOCX, or TXT) above to perform a dynamic ATS content scan, keyword match calculation, and personalized formatting analysis.
+            Upload your resume PDF above to extract full text, match technical keywords, detect essential sections, and view your dynamic ATS score.
           </p>
           <button
             onClick={() => inputRef.current?.click()}
@@ -211,48 +216,70 @@ export function AtsChecker() {
                 {result.score >= 80
                   ? "Excellent! Your resume matches strong industry ATS criteria."
                   : result.score >= 60
-                  ? "Solid content draft. Closing missing keywords and section gaps below will boost your score past 85+."
+                  ? "Solid content draft. Adding missing keywords and section gaps below will boost your score past 85+."
                   : "Needs work. Add technical keywords, quantified metrics, and standard section headers to improve ATS readability."}
               </p>
               <div className="mt-3 flex items-center gap-2 text-xs font-medium text-muted-foreground">
                 <ShieldCheck className="size-4 text-primary-glow" />
-                <span>Parsed Word Count: {result.wordCount} words</span>
+                <span>Extracted Word Count: {result.wordCount} words</span>
               </div>
             </div>
 
-            {/* Strengths Found */}
-            <div className="glass rounded-3xl p-6">
-              <h3 className="flex items-center gap-2 font-semibold text-success">
-                <CheckCircle2 className="size-5" /> Strengths Found ({result.strengths.length})
-              </h3>
-              <ul className="mt-4 space-y-3 text-sm text-muted-foreground">
-                {result.strengths.map((s, idx) => (
-                  <li key={idx} className="flex gap-2">
-                    <CheckCircle2 className="mt-0.5 size-4 shrink-0 text-success" />
-                    <span>{s}</span>
-                  </li>
-                ))}
-              </ul>
+            {/* Strengths & Present Keywords */}
+            <div className="glass rounded-3xl p-6 space-y-4">
+              <div>
+                <h3 className="flex items-center gap-2 font-semibold text-success">
+                  <CheckCircle2 className="size-5" /> Strengths Found ({result.strengths.length})
+                </h3>
+                <ul className="mt-3 space-y-2.5 text-sm text-muted-foreground">
+                  {result.strengths.map((s, idx) => (
+                    <li key={idx} className="flex gap-2">
+                      <CheckCircle2 className="mt-0.5 size-4 shrink-0 text-success" />
+                      <span>{s}</span>
+                    </li>
+                  ))}
+                </ul>
+              </div>
+
+              <div className="border-t border-border pt-4">
+                <h4 className="flex items-center gap-2 text-xs font-semibold uppercase tracking-wider text-primary-glow">
+                  <Highlighter className="size-3.5" /> Present Keywords ({result.detectedKeywords.length})
+                </h4>
+                <div className="mt-2.5 flex flex-wrap gap-1.5 max-h-36 overflow-y-auto pr-1">
+                  {result.detectedKeywords.length > 0 ? (
+                    result.detectedKeywords.map((k) => (
+                      <span
+                        key={k}
+                        className="rounded-full border border-primary/30 bg-primary/15 px-2.5 py-0.5 text-xs font-medium text-primary-glow"
+                      >
+                        {k}
+                      </span>
+                    ))
+                  ) : (
+                    <span className="text-xs text-muted-foreground">No standard technical keywords detected yet.</span>
+                  )}
+                </div>
+              </div>
             </div>
 
             {/* Missing Keywords & Sections */}
             <div className="space-y-5">
               <div className="glass rounded-3xl p-6">
                 <h3 className="flex items-center gap-2 font-semibold text-destructive">
-                  <XCircle className="size-5" /> Missing Keywords ({result.missingKeywords.length})
+                  <XCircle className="size-5" /> Missing Target Keywords ({result.missingKeywords.length})
                 </h3>
-                <div className="mt-4 flex flex-wrap gap-2">
+                <div className="mt-3 flex flex-wrap gap-1.5 max-h-40 overflow-y-auto pr-1">
                   {result.missingKeywords.length > 0 ? (
                     result.missingKeywords.map((m) => (
                       <span
                         key={m}
-                        className="rounded-full border border-destructive/30 bg-destructive/10 px-3 py-1 text-xs font-medium text-destructive"
+                        className="rounded-full border border-destructive/30 bg-destructive/10 px-2.5 py-0.5 text-xs font-medium text-destructive"
                       >
                         {m}
                       </span>
                     ))
                   ) : (
-                    <span className="text-xs text-muted-foreground">Great job! All core technical keywords detected.</span>
+                    <span className="text-xs text-muted-foreground">Great job! All target technical keywords matched.</span>
                   )}
                 </div>
               </div>
@@ -262,7 +289,7 @@ export function AtsChecker() {
                   <LayoutList className="size-5" /> Missing Sections ({result.missingSections.length})
                 </h3>
                 {result.missingSections.length > 0 ? (
-                  <ul className="mt-4 space-y-2 text-sm text-muted-foreground">
+                  <ul className="mt-3 space-y-1.5 text-sm text-muted-foreground">
                     {result.missingSections.map((m) => (
                       <li key={m} className="flex gap-2">
                         <span className="mt-2 size-1.5 shrink-0 rounded-full bg-accent" />
@@ -271,8 +298,8 @@ export function AtsChecker() {
                     ))}
                   </ul>
                 ) : (
-                  <p className="mt-3 text-xs text-muted-foreground">
-                    All standard resume sections detected reliably!
+                  <p className="mt-2 text-xs text-muted-foreground">
+                    All essential resume sections detected reliably!
                   </p>
                 )}
               </div>
@@ -297,17 +324,31 @@ export function AtsChecker() {
             </ol>
           </div>
 
-          <div className="flex justify-center">
+          {/* Extracted Resume Text Drawer Toggle */}
+          <div className="flex flex-col items-center gap-3">
             <button
-              onClick={() =>
-                toast.info("Keywords Highlighted", {
-                  description: `Found ${result.detectedKeywords.length} technical keywords: ${result.detectedKeywords.join(", ")}`,
-                })
-              }
-              className="inline-flex items-center gap-2 rounded-full border border-primary/40 bg-primary/15 px-6 py-3 text-sm font-semibold text-primary-glow transition hover:bg-primary/25"
+              onClick={() => setShowExtractedText((prev) => !prev)}
+              className="inline-flex items-center gap-2 rounded-full border border-primary/40 bg-primary/15 px-6 py-2.5 text-sm font-semibold text-primary-glow transition hover:bg-primary/25"
             >
-              <Highlighter className="size-4" /> View Detected Keywords ({result.detectedKeywords.length})
+              {showExtractedText ? <EyeOff className="size-4" /> : <Eye className="size-4" />}
+              {showExtractedText ? "Hide Extracted Text" : "Inspect Extracted PDF Text"}
             </button>
+
+            {showExtractedText && (
+              <div className="glass w-full rounded-3xl p-6 space-y-3">
+                <div className="flex items-center justify-between">
+                  <h4 className="flex items-center gap-2 font-semibold text-sm">
+                    <Code2 className="size-4 text-primary-glow" /> Extracted Text Layer
+                  </h4>
+                  <span className="text-xs text-muted-foreground">
+                    {result.wordCount} words extracted
+                  </span>
+                </div>
+                <div className="max-h-80 overflow-y-auto rounded-2xl border border-border bg-secondary/60 p-4 text-xs font-mono text-muted-foreground whitespace-pre-wrap leading-relaxed">
+                  {result.extractedText}
+                </div>
+              </div>
+            )}
           </div>
         </>
       )}
