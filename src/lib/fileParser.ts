@@ -155,3 +155,34 @@ export async function extractTextFromFile(
 
   throw new Error(`Unsupported file format or unreadable file: ${file.name}`);
 }
+
+/**
+ * Processes multiple files sequentially and concatenates extracted text.
+ * Reports per-file progress via onProgress.
+ */
+export async function extractTextFromFiles(
+  files: File[],
+  onProgress?: ParseProgressCallback
+): Promise<string> {
+  const parts: string[] = [];
+
+  for (let i = 0; i < files.length; i++) {
+    const file = files[i];
+    onProgress?.(`Processing file ${i + 1} of ${files.length}: ${file.name}…`);
+    try {
+      const text = await extractTextFromFile(file, onProgress);
+      if (text.trim().length > 0) {
+        parts.push(`--- ${file.name} ---\n${text.trim()}`);
+      }
+    } catch (err: any) {
+      console.warn(`Skipping ${file.name}:`, err.message);
+      onProgress?.(`⚠️ Could not extract text from ${file.name}, skipping…`);
+    }
+  }
+
+  if (parts.length === 0) {
+    throw new Error("No readable text could be extracted from any of the uploaded files.");
+  }
+
+  return parts.join("\n\n");
+}

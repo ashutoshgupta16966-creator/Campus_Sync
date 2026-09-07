@@ -1,20 +1,46 @@
-import { useRef, useState } from "react";
+import { useRef, useState, useCallback } from "react";
 import { toast } from "sonner";
 import {
   Sparkles,
   Loader2,
   Copy,
-  ListChecks,
-  Sigma,
-  HelpCircle,
   FileDown,
   UploadCloud,
+  BookOpen,
+  Camera,
+  X,
   FileText,
   Image as ImageIcon,
-  BookOpen,
+  ClipboardList,
+  Lightbulb,
+  Brain,
+  AlignLeft,
 } from "lucide-react";
-import { extractTextFromFile } from "@/lib/fileParser";
+import { extractTextFromFiles } from "@/lib/fileParser";
 import { generateSummaryFromText, type SummaryResult } from "@/lib/summarizerEngine";
+
+const ACCEPTED = ".pdf,.txt,.png,.jpg,.jpeg,.webp,.doc,.docx";
+const ACCEPTED_LABEL = "PDF, TXT, DOC, PNG, JPG, WEBP";
+
+// ─── FileChip ─────────────────────────────────────────────────────────────
+
+function FileChip({ file, onRemove }: { file: File; onRemove: () => void }) {
+  const isImage = file.type.startsWith("image/");
+  return (
+    <div className="flex items-center gap-1.5 rounded-full border border-border bg-secondary/60 pl-2.5 pr-1.5 py-1 text-xs">
+      {isImage ? <ImageIcon className="size-3 text-primary-glow" /> : <FileText className="size-3 text-primary-glow" />}
+      <span className="max-w-[140px] truncate font-medium">{file.name}</span>
+      <button
+        onClick={onRemove}
+        className="ml-0.5 flex size-4 items-center justify-center rounded-full hover:bg-destructive/20 hover:text-destructive transition"
+      >
+        <X className="size-3" />
+      </button>
+    </div>
+  );
+}
+
+// ─── Summarizer ───────────────────────────────────────────────────────────
 
 export function Summarizer() {
   const [notes, setNotes] = useState("");
@@ -23,134 +49,222 @@ export function Summarizer() {
   const [parseStatus, setParseStatus] = useState("");
   const [summary, setSummary] = useState<SummaryResult | null>(null);
   const [dragging, setDragging] = useState(false);
-  const [uploadedFileName, setUploadedFileName] = useState<string | null>(null);
+  const [uploadedFiles, setUploadedFiles] = useState<File[]>([]);
+
   const fileInputRef = useRef<HTMLInputElement>(null);
+  const cameraInputRef = useRef<HTMLInputElement>(null);
 
-  const processFile = async (file: File) => {
-    setParsing(true);
-    setParseStatus("Reading file…");
-    setUploadedFileName(file.name);
-    try {
-      const extractedText = await extractTextFromFile(file, (status) => {
-        setParseStatus(status);
-      });
+  // ── file handling ──────────────────────────────────────────────────────
 
-      if (!extractedText || extractedText.trim().length === 0) {
-        throw new Error("No readable text could be extracted from this file.");
-      }
+  const addFiles = useCallback((newFiles: FileList | null) => {
+    if (!newFiles || newFiles.length === 0) return;
+    const arr = Array.from(newFiles);
+    setUploadedFiles((prev) => {
+      const existingNames = new Set(prev.map((f) => f.name));
+      const unique = arr.filter((f) => !existingNames.has(f.name));
+      return [...prev, ...unique];
+    });
+  }, []);
 
-      setNotes(extractedText);
-      toast.success("Text extracted", {
-        description: `Loaded text from ${file.name}. Click 'Generate Summary' to summarize.`,
-      });
-
-      // Automatically trigger summarization on successful file upload
-      triggerSummarize(extractedText);
-    } catch (err: any) {
-      console.error("File text extraction failed:", err);
-      toast.error("Extraction failed", {
-        description: err.message || "Could not extract text from uploaded file.",
-      });
-    } finally {
-      setParsing(false);
-    }
+  const removeFile = (index: number) => {
+    setUploadedFiles((prev) => prev.filter((_, i) => i !== index));
   };
 
-  const triggerSummarize = (textToSummarize: string) => {
-    if (!textToSummarize.trim()) {
-      toast.error("Paste or upload notes first", {
-        description: "CampusSync needs lecture text to generate a summary.",
+  const clearAll = () => {
+    setUploadedFiles([]);
+    setNotes("");
+    setSummary(null);
+  };
+
+  // ── main processing ────────────────────────────────────────────────────
+
+  const processAndSummarize = async (filesToProcess: File[], textFallback: string) => {
+    let combinedText = textFallback.trim();
+
+    if (filesToProcess.length > 0) {
+      setParsing(true);
+      setParseStatus(`Reading ${filesToProcess.length} file${filesToProcess.length > 1 ? "s" : ""}…`);
+      try {
+        const extracted = await extractTextFromFiles(filesToProcess, (status) => {
+          setParseStatus(status);
+        });
+        combinedText = extracted + (textFallback ? "\n\n" + textFallback : "");
+        setNotes(combinedText);
+        toast.success("Text extracted", {
+          description: `Parsed ${filesToProcess.length} file${filesToProcess.length > 1 ? "s" : ""}. Generating summary…`,
+        });
+      } catch (err: any) {
+        setParsing(false);
+        toast.error("Extraction failed", {
+          description: err.message || "Could not extract text from uploaded files.",
+        });
+        return;
+      } finally {
+        setParsing(false);
+      }
+    }
+
+    if (!combinedText.trim()) {
+      toast.error("No content to summarize", {
+        description: "Please upload files or paste notes below.",
       });
       return;
     }
+
     setLoading(true);
-    setTimeout(() => {
-      const res = generateSummaryFromText(textToSummarize);
-      setSummary(res);
-      setLoading(false);
-      toast.success("Summary ready", { description: "Dynamic study cards generated!" });
-    }, 800);
+    // Use rAF to allow UI to update before CPU-heavy work
+    requestAnimationFrame(() => {
+      setTimeout(() => {
+        const result = generateSummaryFromText(combinedText);
+        setSummary(result);
+        setLoading(false);
+        toast.success("Summary ready!", { description: "Study cards generated from your content." });
+      }, 50);
+    });
   };
+
+  const handleGenerate = () => {
+    processAndSummarize(uploadedFiles, notes);
+  };
+
+  const handleDrop = (e: React.DragEvent) => {
+    e.preventDefault();
+    setDragging(false);
+    addFiles(e.dataTransfer.files);
+  };
+
+  // ── copy ──────────────────────────────────────────────────────────────
 
   const copySummary = () => {
     if (!summary) return;
-    const text = [
-      "KEY TAKEAWAYS",
-      ...summary.takeaways.map((t) => "• " + t),
+    const lines = [
+      "📌 QUICK OVERVIEW",
+      summary.overview,
       "",
-      "FORMULAS & CONCEPTS",
+      "🔑 KEY CONCEPTS & TAKEAWAYS",
+      ...summary.takeaways.map((t, i) => `${i + 1}. ${t}`),
+      "",
+      "💡 IMPORTANT DEFINITIONS / FORMULAS",
       ...summary.formulas.map((f) => `${f.name}: ${f.body}`),
       "",
-      "LIKELY EXAM QUESTIONS",
-      ...summary.questions.map((q, i) => `${i + 1}. ${q}`),
-    ].join("\n");
-    navigator.clipboard?.writeText(text).catch(() => {});
+      "🧠 EXAM / REVISION SUMMARY",
+      ...summary.examPoints.map((p) => `• ${p}`),
+    ];
+    navigator.clipboard?.writeText(lines.join("\n")).catch(() => {});
     toast.success("Summary copied to clipboard");
   };
 
+  // ── render ─────────────────────────────────────────────────────────────
+
   return (
     <div className="space-y-6">
-      {/* Input Block with Drag & Drop Uploader */}
+      {/* ── Input Block ── */}
       <div className="glass rounded-3xl p-5 sm:p-7 space-y-4">
-        <h2 className="text-xl font-semibold">Lecture Notes & File Summarizer</h2>
-        <p className="text-sm text-muted-foreground">
-          Upload a lecture PDF, TXT document, or handwritten/scanned notes image (PNG/JPG) — or paste your notes directly below to distill them into exam-ready study cards.
-        </p>
+        <div className="flex items-start justify-between gap-4">
+          <div>
+            <h2 className="text-xl font-semibold">AI Notes Summarizer</h2>
+            <p className="mt-1 text-sm text-muted-foreground">
+              Upload files, snap notes with your camera, or paste text — get structured study cards instantly.
+            </p>
+          </div>
+          {(uploadedFiles.length > 0 || notes || summary) && (
+            <button
+              onClick={clearAll}
+              className="shrink-0 flex items-center gap-1.5 rounded-full border border-border px-3 py-1.5 text-xs text-muted-foreground hover:border-destructive/50 hover:text-destructive transition"
+            >
+              <X className="size-3" /> Clear all
+            </button>
+          )}
+        </div>
 
-        {/* File Dropzone */}
+        {/* ── Dropzone ── */}
         <div
-          onDragOver={(e) => {
-            e.preventDefault();
-            setDragging(true);
-          }}
+          onDragOver={(e) => { e.preventDefault(); setDragging(true); }}
           onDragLeave={() => setDragging(false)}
-          onDrop={(e) => {
-            e.preventDefault();
-            setDragging(false);
-            const f = e.dataTransfer.files?.[0];
-            if (f) processFile(f);
-          }}
+          onDrop={handleDrop}
           onClick={() => fileInputRef.current?.click()}
           className={
-            "flex cursor-pointer flex-col items-center rounded-2xl border-2 border-dashed p-6 text-center transition " +
+            "flex cursor-pointer flex-col items-center rounded-2xl border-2 border-dashed p-6 text-center transition select-none " +
             (dragging ? "border-primary bg-primary/5 glow-ring" : "border-border bg-secondary/20 hover:border-primary/50")
           }
         >
+          {/* hidden multi-file input */}
           <input
             ref={fileInputRef}
             type="file"
-            accept=".pdf,.txt,.png,.jpg,.jpeg,.webp,.doc,.docx"
+            accept={ACCEPTED}
+            multiple
             className="hidden"
-            onChange={(e) => {
-              const f = e.target.files?.[0];
-              if (f) processFile(f);
-            }}
+            onChange={(e) => addFiles(e.target.files)}
           />
-          <div className="flex gap-2 text-primary-glow">
-            <UploadCloud className="size-6" />
-            <ImageIcon className="size-6" />
-            <FileText className="size-6" />
+          {/* hidden camera input */}
+          <input
+            ref={cameraInputRef}
+            type="file"
+            accept="image/*"
+            capture="environment"
+            multiple
+            className="hidden"
+            onChange={(e) => addFiles(e.target.files)}
+          />
+
+          <div className="flex gap-3 text-primary-glow">
+            <UploadCloud className="size-7" />
+            <ImageIcon className="size-7" />
+            <FileText className="size-7" />
           </div>
           <p className="mt-2 text-sm font-semibold">
-            {uploadedFileName ? `Uploaded: ${uploadedFileName}` : "Drag & drop PDF, TXT, or Image files (PNG, JPG)"}
+            Drag & drop or click to upload files
           </p>
           <p className="mt-0.5 text-xs text-muted-foreground">
-            {parsing ? parseStatus : "Supports client-side PDF text extraction and Tesseract OCR"}
+            {ACCEPTED_LABEL} — multiple files supported
           </p>
         </div>
 
-        {/* Notes Textarea */}
-        <textarea
-          value={notes}
-          onChange={(e) => setNotes(e.target.value)}
-          rows={7}
-          placeholder="Paste or edit lecture notes here…"
-          className="w-full resize-y rounded-2xl border border-border bg-secondary/40 p-4 text-sm outline-none transition focus:border-primary focus:ring-2 focus:ring-ring/40"
-        />
+        {/* ── Camera button ── */}
+        <button
+          onClick={(e) => { e.stopPropagation(); cameraInputRef.current?.click(); }}
+          className="flex w-full items-center justify-center gap-2 rounded-2xl border border-border bg-secondary/30 py-2.5 text-sm font-medium text-muted-foreground transition hover:border-primary/50 hover:text-foreground"
+        >
+          <Camera className="size-4 text-primary-glow" />
+          Snap Notes with Camera (mobile)
+        </button>
 
+        {/* ── File chips ── */}
+        {uploadedFiles.length > 0 && (
+          <div className="flex flex-wrap gap-2">
+            {uploadedFiles.map((f, i) => (
+              <FileChip key={`${f.name}-${i}`} file={f} onRemove={() => removeFile(i)} />
+            ))}
+          </div>
+        )}
+
+        {/* ── Parse status bar ── */}
+        {parsing && (
+          <div className="flex items-center gap-2 rounded-xl border border-border bg-secondary/40 px-4 py-2.5 text-xs text-muted-foreground">
+            <Loader2 className="size-3.5 animate-spin text-primary-glow" />
+            <span>{parseStatus}</span>
+          </div>
+        )}
+
+        {/* ── Notes textarea ── */}
+        <div>
+          <label className="mb-1.5 block text-xs font-semibold uppercase tracking-wider text-muted-foreground">
+            Or paste / edit notes manually
+          </label>
+          <textarea
+            value={notes}
+            onChange={(e) => setNotes(e.target.value)}
+            rows={7}
+            placeholder="Paste lecture notes, textbook paragraphs, or any study material here…"
+            className="w-full resize-y rounded-2xl border border-border bg-secondary/40 p-4 text-sm outline-none transition focus:border-primary focus:ring-2 focus:ring-ring/40"
+          />
+        </div>
+
+        {/* ── Action buttons ── */}
         <div className="flex flex-wrap items-center gap-3">
           <button
-            onClick={() => triggerSummarize(notes)}
+            onClick={handleGenerate}
             disabled={loading || parsing}
             className="inline-flex items-center gap-2 rounded-full bg-linear-to-r from-primary to-primary-glow px-6 py-2.5 text-sm font-semibold text-primary-foreground glow-ring transition hover:opacity-90 disabled:opacity-60"
           >
@@ -159,7 +273,7 @@ export function Summarizer() {
             ) : (
               <Sparkles className="size-4" />
             )}
-            {parsing ? "Parsing File…" : loading ? "Summarizing…" : "Generate Summary"}
+            {parsing ? "Extracting Text…" : loading ? "Summarizing…" : "Generate Summary"}
           </button>
 
           {summary && (
@@ -173,20 +287,20 @@ export function Summarizer() {
         </div>
       </div>
 
-      {/* Parsing / Loading State Indicator */}
-      {(loading || parsing) && (
+      {/* ── Loading overlay ── */}
+      {(loading || parsing) && !summary && (
         <div className="glass flex flex-col items-center justify-center rounded-3xl p-14 text-center">
           <Loader2 className="size-8 animate-spin text-primary-glow" />
           <p className="mt-4 font-medium text-foreground">
-            {parsing ? parseStatus : "Synthesizing lecture notes into key study cards…"}
+            {parsing ? parseStatus : "Analysing your notes and building study cards…"}
           </p>
           <p className="mt-1 text-xs text-muted-foreground">
-            Extracting core concepts, identifying formulas, and formulating exam questions…
+            Identifying key concepts, definitions, formulas, and exam points…
           </p>
         </div>
       )}
 
-      {/* Initial Empty State Placeholder */}
+      {/* ── Empty placeholder ── */}
       {!loading && !parsing && !summary && (
         <div className="glass flex flex-col items-center justify-center rounded-3xl p-12 text-center">
           <div className="flex size-16 items-center justify-center rounded-3xl bg-secondary/80 text-primary-glow">
@@ -194,91 +308,115 @@ export function Summarizer() {
           </div>
           <h3 className="mt-4 text-xl font-bold">No Summary Generated Yet</h3>
           <p className="mt-2 max-w-md text-sm text-muted-foreground">
-            Upload a lecture PDF or image file above, or paste your class notes to generate key takeaways, formulas, and 3 likely exam questions.
+            Upload lecture PDFs, snap photos of board notes, or paste text above to generate structured study cards.
           </p>
-          <button
-            onClick={() => fileInputRef.current?.click()}
-            className="mt-6 inline-flex items-center gap-2 rounded-full border border-primary/40 bg-primary/15 px-6 py-2.5 text-sm font-semibold text-primary-glow transition hover:bg-primary/25"
-          >
-            <UploadCloud className="size-4" /> Upload File to Analyze
-          </button>
+          <div className="mt-6 flex flex-wrap justify-center gap-3">
+            <button
+              onClick={() => fileInputRef.current?.click()}
+              className="inline-flex items-center gap-2 rounded-full border border-primary/40 bg-primary/15 px-5 py-2 text-sm font-semibold text-primary-glow transition hover:bg-primary/25"
+            >
+              <UploadCloud className="size-4" /> Upload Files
+            </button>
+            <button
+              onClick={() => cameraInputRef.current?.click()}
+              className="inline-flex items-center gap-2 rounded-full border border-border bg-secondary/50 px-5 py-2 text-sm font-medium transition hover:bg-secondary"
+            >
+              <Camera className="size-4" /> Use Camera
+            </button>
+          </div>
         </div>
       )}
 
-      {/* Generated Summary Display */}
+      {/* ── Summary Output ── */}
       {summary && !loading && !parsing && (
-        <>
-          <div className="grid gap-5 lg:grid-cols-3">
-            {/* Key Concepts */}
+        <div className="space-y-5">
+          {/* 📌 Quick Overview */}
+          <div className="glass rounded-3xl p-6">
+            <div className="flex items-center gap-2 text-primary-glow">
+              <AlignLeft className="size-5" />
+              <h3 className="font-semibold">📌 Quick Overview</h3>
+            </div>
+            <p className="mt-3 text-sm leading-relaxed text-muted-foreground">
+              {summary.overview}
+            </p>
+          </div>
+
+          <div className="grid gap-5 lg:grid-cols-2">
+            {/* 🔑 Key Concepts & Takeaways */}
             <div className="glass rounded-3xl p-6">
               <div className="flex items-center gap-2 text-primary-glow">
-                <ListChecks className="size-5" />
-                <h3 className="font-semibold">Key Concepts</h3>
+                <ClipboardList className="size-5" />
+                <h3 className="font-semibold">🔑 Key Concepts & Takeaways</h3>
               </div>
-              <ul className="mt-4 space-y-3 text-sm text-muted-foreground">
-                {summary.takeaways.map((t, i) => (
-                  <li key={i} className="flex gap-2">
-                    <span className="mt-2 size-1.5 shrink-0 rounded-full bg-primary" />
-                    <span>{t}</span>
-                  </li>
-                ))}
-              </ul>
+              {summary.takeaways.length > 0 ? (
+                <ol className="mt-4 space-y-2.5 text-sm text-muted-foreground">
+                  {summary.takeaways.map((t, i) => (
+                    <li key={i} className="flex gap-3">
+                      <span className="flex size-5 shrink-0 items-center justify-center rounded-full bg-primary/20 text-[10px] font-bold text-primary-glow">
+                        {i + 1}
+                      </span>
+                      <span>{t}</span>
+                    </li>
+                  ))}
+                </ol>
+              ) : (
+                <p className="mt-3 text-xs text-muted-foreground">No key concepts extracted — try adding more detailed notes.</p>
+              )}
             </div>
 
-            {/* Important Formulas */}
+            {/* 💡 Important Definitions / Formulas */}
             <div className="glass rounded-3xl p-6">
               <div className="flex items-center gap-2 text-primary-glow">
-                <Sigma className="size-5" />
-                <h3 className="font-semibold">Important Formulas & Concepts</h3>
+                <Lightbulb className="size-5" />
+                <h3 className="font-semibold">💡 Important Definitions / Formulas</h3>
               </div>
-              <ul className="mt-4 space-y-3">
-                {summary.formulas.length > 0 ? (
-                  summary.formulas.map((f, i) => (
+              {summary.formulas.length > 0 ? (
+                <ul className="mt-4 space-y-2.5">
+                  {summary.formulas.map((f, i) => (
                     <li key={i} className="rounded-xl border border-border bg-secondary/40 p-3">
-                      <p className="text-xs uppercase tracking-wide text-muted-foreground">
+                      <p className="text-[11px] font-semibold uppercase tracking-wider text-primary-glow">
                         {f.name}
                       </p>
-                      <p className="mt-1 font-mono text-sm">{f.body}</p>
+                      <p className="mt-1 font-mono text-sm text-foreground">{f.body}</p>
                     </li>
-                  ))
-                ) : (
-                  <p className="text-xs text-muted-foreground">No explicit formulas detected in notes.</p>
-                )}
-              </ul>
-            </div>
-
-            {/* Likely Exam Questions */}
-            <div className="glass rounded-3xl p-6">
-              <div className="flex items-center gap-2 text-primary-glow">
-                <HelpCircle className="size-5" />
-                <h3 className="font-semibold">Likely Exam Questions</h3>
-              </div>
-              <ol className="mt-4 space-y-3 text-sm text-muted-foreground">
-                {summary.questions.map((q, i) => (
-                  <li key={i} className="flex gap-3">
-                    <span className="flex size-6 shrink-0 items-center justify-center rounded-full bg-primary/20 text-xs font-semibold text-primary-glow">
-                      {i + 1}
-                    </span>
-                    <span>{q}</span>
-                  </li>
-                ))}
-              </ol>
+                  ))}
+                </ul>
+              ) : (
+                <p className="mt-3 text-xs text-muted-foreground">No explicit formulas or definitions detected. Try including equations or "Term: definition" lines.</p>
+              )}
             </div>
           </div>
 
+          {/* 🧠 Exam / Revision Summary */}
+          <div className="glass rounded-3xl p-6">
+            <div className="flex items-center gap-2 text-primary-glow">
+              <Brain className="size-5" />
+              <h3 className="font-semibold">🧠 Exam / Revision Summary</h3>
+            </div>
+            {summary.examPoints.length > 0 ? (
+              <ul className="mt-4 grid gap-2 sm:grid-cols-2">
+                {summary.examPoints.map((p, i) => (
+                  <li key={i} className="flex gap-2 text-sm text-muted-foreground">
+                    <span className="mt-1.5 size-1.5 shrink-0 rounded-full bg-primary-glow" />
+                    <span>{p}</span>
+                  </li>
+                ))}
+              </ul>
+            ) : (
+              <p className="mt-3 text-xs text-muted-foreground">Not enough content for revision points — add more detailed notes.</p>
+            )}
+          </div>
+
+          {/* Export button */}
           <div className="flex justify-center">
             <button
-              onClick={() =>
-                toast.info("PDF Export", {
-                  description: "Summary formatted for print/download.",
-                })
-              }
+              onClick={() => toast.info("PDF Export", { description: "Summary formatted for print/download." })}
               className="inline-flex items-center gap-2 rounded-full border border-primary/40 bg-primary/15 px-6 py-3 text-sm font-semibold text-primary-glow transition hover:bg-primary/25"
             >
               <FileDown className="size-4" /> Export Summary as PDF
             </button>
           </div>
-        </>
+        </div>
       )}
     </div>
   );
