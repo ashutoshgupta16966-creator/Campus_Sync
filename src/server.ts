@@ -2,6 +2,7 @@ import "./lib/error-capture";
 
 import { consumeLastCapturedError } from "./lib/error-capture";
 import { renderErrorPage } from "./lib/error-page";
+import { runServerGeminiSummarizer } from "./lib/serverSummarizer";
 
 type ServerEntry = {
   fetch: (request: Request, env: unknown, ctx: unknown) => Promise<Response> | Response;
@@ -46,6 +47,35 @@ function isH3SwallowedErrorBody(body: string): boolean {
 
 export default {
   async fetch(request: Request, env: unknown, ctx: unknown) {
+    const url = new URL(request.url);
+
+    // Dedicated server-side API route for summarization
+    if (url.pathname === "/api/summarize" && request.method === "POST") {
+      try {
+        const body = (await request.json()) as { notes?: string };
+        const notes = body?.notes;
+
+        if (!notes || typeof notes !== "string" || !notes.trim()) {
+          return new Response(JSON.stringify({ error: "No readable notes text provided." }), {
+            status: 400,
+            headers: { "content-type": "application/json" },
+          });
+        }
+
+        const summary = await runServerGeminiSummarizer(notes);
+        return new Response(JSON.stringify(summary), {
+          status: 200,
+          headers: { "content-type": "application/json" },
+        });
+      } catch (err: any) {
+        console.error("[CampusSync API] /api/summarize failed:", err);
+        return new Response(JSON.stringify({ error: err.message || "Failed to generate summary" }), {
+          status: 500,
+          headers: { "content-type": "application/json" },
+        });
+      }
+    }
+
     try {
       const handler = await getServerEntry();
       const response = await handler.fetch(request, env, ctx);

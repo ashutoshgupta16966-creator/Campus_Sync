@@ -1,4 +1,4 @@
-import { useRef, useState, useCallback, useEffect } from "react";
+import { useRef, useState, useCallback } from "react";
 import { toast } from "sonner";
 import {
   Sparkles,
@@ -15,16 +15,10 @@ import {
   Lightbulb,
   Brain,
   AlignLeft,
-  Key,
-  CheckCircle2,
-  AlertCircle,
-  ExternalLink,
 } from "lucide-react";
 import { extractTextFromFiles } from "@/lib/fileParser";
 import {
   generateSummaryFromText,
-  getGeminiApiKey,
-  setGeminiApiKey,
   type SummaryResult,
 } from "@/lib/summarizerEngine";
 
@@ -60,19 +54,6 @@ export function Summarizer() {
   const [dragging, setDragging] = useState(false);
   const [uploadedFiles, setUploadedFiles] = useState<File[]>([]);
 
-  // API Key management
-  const [apiKey, setApiKey] = useState("");
-  const [showKeyModal, setShowKeyModal] = useState(false);
-  const [keyInput, setKeyInput] = useState("");
-
-  useEffect(() => {
-    const existing = getGeminiApiKey();
-    if (existing) {
-      setApiKey(existing);
-      setKeyInput(existing);
-    }
-  }, []);
-
   const fileInputRef = useRef<HTMLInputElement>(null);
   const cameraInputRef = useRef<HTMLInputElement>(null);
 
@@ -98,36 +79,12 @@ export function Summarizer() {
     setSummary(null);
   };
 
-  const handleSaveApiKey = () => {
-    const trimmed = keyInput.trim();
-    setGeminiApiKey(trimmed);
-    setApiKey(trimmed);
-    setShowKeyModal(false);
-    if (trimmed) {
-      toast.success("Gemini API Key saved", {
-        description: "Your key is active for summarizing notes.",
-      });
-    } else {
-      toast.info("Gemini API Key removed");
-    }
-  };
-
   // ── main processing ────────────────────────────────────────────────────
 
   const processAndSummarize = async (filesToProcess: File[], textFallback: string) => {
     let combinedText = textFallback.trim();
 
-    // 1. Check API Key first
-    const activeKey = apiKey.trim() || getGeminiApiKey();
-    if (!activeKey) {
-      setShowKeyModal(true);
-      toast.error("Gemini API Key Required", {
-        description: "Please enter your Gemini API key to activate AI summarization.",
-      });
-      return;
-    }
-
-    // 2. Extract text if files are uploaded
+    // Extract text if files are uploaded
     if (filesToProcess.length > 0) {
       setParsing(true);
       setParseStatus(`Extracting text from ${filesToProcess.length} file${filesToProcess.length > 1 ? "s" : ""}…`);
@@ -138,7 +95,7 @@ export function Summarizer() {
         combinedText = extracted + (textFallback ? "\n\n" + textFallback : "");
         setNotes(combinedText);
         toast.success("Text extracted", {
-          description: `Extracted ${filesToProcess.length} file${filesToProcess.length > 1 ? "s" : ""}. Sending to Gemini…`,
+          description: `Extracted ${filesToProcess.length} file${filesToProcess.length > 1 ? "s" : ""}. Generating summary…`,
         });
       } catch (err: any) {
         setParsing(false);
@@ -158,19 +115,18 @@ export function Summarizer() {
       return;
     }
 
-    // 3. Call Gemini AI Summarizer
+    // Call server-side Gemini AI Summarizer
     setLoading(true);
-    setParseStatus("Sending extracted content to Gemini AI…");
+    setParseStatus("Analyzing notes with Gemini AI…");
 
     try {
       const result = await generateSummaryFromText(
         combinedText,
-        activeKey,
         (status) => setParseStatus(status)
       );
       setSummary(result);
       toast.success("Summary ready!", {
-        description: "High-yield study cards generated from your notes.",
+        description: "Study cards generated from your notes.",
       });
     } catch (err: any) {
       console.error("[CampusSync Summarizer] Error:", err);
@@ -223,39 +179,18 @@ export function Summarizer() {
           <div>
             <h2 className="text-xl font-semibold">AI Notes Summarizer</h2>
             <p className="mt-1 text-sm text-muted-foreground">
-              Upload files, snap notes with your camera, or paste text — powered by Google Gemini AI.
+              Upload files, snap notes with your camera, or paste text — get structured study cards instantly.
             </p>
           </div>
 
-          <div className="flex items-center gap-2">
+          {(uploadedFiles.length > 0 || notes || summary) && (
             <button
-              onClick={() => setShowKeyModal(true)}
-              className={
-                "flex items-center gap-1.5 rounded-full border px-3 py-1.5 text-xs font-medium transition " +
-                (apiKey
-                  ? "border-primary/40 bg-primary/10 text-primary-glow hover:bg-primary/20"
-                  : "border-amber-500/40 bg-amber-500/10 text-amber-400 hover:bg-amber-500/20")
-              }
-              title={apiKey ? "Gemini API key configured" : "Click to configure Gemini API Key"}
+              onClick={clearAll}
+              className="shrink-0 flex items-center gap-1.5 rounded-full border border-border px-3 py-1.5 text-xs text-muted-foreground hover:border-destructive/50 hover:text-destructive transition"
             >
-              <Key className="size-3.5" />
-              <span>{apiKey ? "Gemini Active" : "Set API Key"}</span>
-              {apiKey ? (
-                <CheckCircle2 className="size-3 text-emerald-400" />
-              ) : (
-                <AlertCircle className="size-3 text-amber-400" />
-              )}
+              <X className="size-3" /> Clear all
             </button>
-
-            {(uploadedFiles.length > 0 || notes || summary) && (
-              <button
-                onClick={clearAll}
-                className="shrink-0 flex items-center gap-1.5 rounded-full border border-border px-3 py-1.5 text-xs text-muted-foreground hover:border-destructive/50 hover:text-destructive transition"
-              >
-                <X className="size-3" /> Clear all
-              </button>
-            )}
-          </div>
+          )}
         </div>
 
         {/* ── Dropzone ── */}
@@ -368,79 +303,15 @@ export function Summarizer() {
         </div>
       </div>
 
-      {/* ── API Key Modal ── */}
-      {showKeyModal && (
-        <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/60 backdrop-blur-xs p-4">
-          <div className="glass w-full max-w-md rounded-3xl p-6 shadow-2xl border border-border bg-card">
-            <div className="flex items-center justify-between">
-              <div className="flex items-center gap-2 text-primary-glow">
-                <Key className="size-5" />
-                <h3 className="text-lg font-semibold text-foreground">Gemini API Key</h3>
-              </div>
-              <button
-                onClick={() => setShowKeyModal(false)}
-                className="rounded-full p-1 text-muted-foreground hover:bg-secondary hover:text-foreground"
-              >
-                <X className="size-4" />
-              </button>
-            </div>
-
-            <p className="mt-2 text-xs text-muted-foreground leading-relaxed">
-              CampusSync uses Google Gemini AI to analyze your notes, formulas, and documents accurately.
-              Your key is stored securely in your local browser storage.
-            </p>
-
-            <div className="mt-4 space-y-2">
-              <label className="block text-xs font-semibold uppercase tracking-wider text-muted-foreground">
-                Google Gemini API Key
-              </label>
-              <input
-                type="password"
-                value={keyInput}
-                onChange={(e) => setKeyInput(e.target.value)}
-                placeholder="AIzaSy..."
-                className="w-full rounded-xl border border-border bg-secondary/50 px-3.5 py-2.5 text-sm outline-none transition focus:border-primary focus:ring-2 focus:ring-ring/40"
-              />
-            </div>
-
-            <div className="mt-3 flex items-center justify-between text-xs text-muted-foreground">
-              <a
-                href="https://aistudio.google.com/app/apikey"
-                target="_blank"
-                rel="noreferrer"
-                className="inline-flex items-center gap-1 text-primary-glow hover:underline"
-              >
-                Get a free key from Google AI Studio <ExternalLink className="size-3" />
-              </a>
-            </div>
-
-            <div className="mt-6 flex justify-end gap-2">
-              <button
-                onClick={() => setShowKeyModal(false)}
-                className="rounded-full border border-border px-4 py-2 text-xs font-medium text-muted-foreground hover:bg-secondary"
-              >
-                Cancel
-              </button>
-              <button
-                onClick={handleSaveApiKey}
-                className="rounded-full bg-primary px-5 py-2 text-xs font-semibold text-primary-foreground hover:opacity-90 transition"
-              >
-                Save Key
-              </button>
-            </div>
-          </div>
-        </div>
-      )}
-
       {/* ── Loading overlay ── */}
       {(loading || parsing) && !summary && (
         <div className="glass flex flex-col items-center justify-center rounded-3xl p-14 text-center">
           <Loader2 className="size-8 animate-spin text-primary-glow" />
           <p className="mt-4 font-medium text-foreground">
-            {parsing ? parseStatus : "Sending to Gemini AI and structuring study cards…"}
+            {parsing ? parseStatus : "Analyzing notes with Gemini AI and structuring study cards…"}
           </p>
           <p className="mt-1 text-xs text-muted-foreground">
-            Accurately extracting key concepts, step-by-step breakdown, formulas, and revision points…
+            Extracting key concepts, step-by-step breakdown, formulas, and revision points…
           </p>
         </div>
       )}
