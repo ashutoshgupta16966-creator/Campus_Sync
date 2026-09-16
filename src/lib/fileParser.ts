@@ -22,7 +22,7 @@ export type ParseProgressCallback = (status: string) => void;
  * Renders a PDF page onto an HTML Canvas and runs Tesseract OCR.
  * Used as a fallback for scanned image-based PDF pages.
  */
-async function ocrPdfPage(page: any): Promise<string> {
+async function ocrPdfPage(page: any, pageNum?: number): Promise<string> {
   try {
     const viewport = page.getViewport({ scale: 1.5 });
     const canvas = document.createElement("canvas");
@@ -37,7 +37,11 @@ async function ocrPdfPage(page: any): Promise<string> {
     const worker = await createWorker("eng");
     const ret = await worker.recognize(canvas);
     await worker.terminate();
-    return ret.data.text || "";
+    const text = (ret.data.text || "").trim();
+    if (text) {
+      console.log(`[CampusSync OCR] Extracted text from scanned PDF page ${pageNum ?? ""}:\n`, text);
+    }
+    return text;
   } catch (err) {
     console.warn("OCR on PDF page failed:", err);
     return "";
@@ -56,14 +60,16 @@ export async function extractTextFromFile(
 
   // 1. Plain Text files
   if (fileName.endsWith(".txt") || fileType.includes("text/plain")) {
-    onProgress?.("Reading text file…");
+    onProgress?.(`Reading text file: ${file.name}…`);
     const text = await file.text();
-    return text.trim();
+    const cleanText = text.trim();
+    console.log(`[CampusSync Parser] Read TXT file "${file.name}" (${cleanText.length} chars).`);
+    return cleanText;
   }
 
   // 2. PDF files
   if (fileName.endsWith(".pdf") || fileType.includes("pdf")) {
-    onProgress?.("Extracting text from PDF pages…");
+    onProgress?.(`Opening PDF: ${file.name}…`);
     try {
       const arrayBuffer = await file.arrayBuffer();
       const loadingTask = pdfjsLib.getDocument({
@@ -71,13 +77,13 @@ export async function extractTextFromFile(
         useSystemFonts: true,
         disableFontFace: true,
       });
-      
+
       const pdfDoc = await loadingTask.promise;
       let fullText = "";
       let scannedPagesCount = 0;
 
       for (let i = 1; i <= pdfDoc.numPages; i++) {
-        onProgress?.(`Extracting text from PDF page ${i} of ${pdfDoc.numPages}…`);
+        onProgress?.(`Extracting PDF page ${i} of ${pdfDoc.numPages} (${file.name})…`);
         const page = await pdfDoc.getPage(i);
         const textContent = await page.getTextContent();
         const pageStrings = textContent.items
@@ -85,21 +91,22 @@ export async function extractTextFromFile(
           .filter(Boolean);
 
         const pageText = pageStrings.join(" ").trim();
-        
+
         if (pageText.length > 10) {
           fullText += pageText + "\n\n";
         } else {
           // Page has no direct text layer; attempt Canvas OCR for scanned PDF page
           scannedPagesCount++;
           onProgress?.(`Running OCR on scanned PDF page ${i} of ${pdfDoc.numPages}…`);
-          const ocrText = await ocrPdfPage(page);
-          if (ocrText.trim().length > 0) {
-            fullText += ocrText.trim() + "\n\n";
+          const ocrText = await ocrPdfPage(page, i);
+          if (ocrText.length > 0) {
+            fullText += ocrText + "\n\n";
           }
         }
       }
 
       if (fullText.trim().length > 0) {
+        console.log(`[CampusSync Parser] Parsed PDF "${file.name}" (${pdfDoc.numPages} pages, ${fullText.trim().length} chars, scannedPages=${scannedPagesCount}).`);
         return fullText.trim();
       }
 
@@ -117,12 +124,14 @@ export async function extractTextFromFile(
     fileType.includes("wordprocessingml") ||
     fileType.includes("msword")
   ) {
-    onProgress?.("Reading Word document structure…");
+    onProgress?.(`Reading Word document: ${file.name}…`);
     try {
       const arrayBuffer = await file.arrayBuffer();
       const result = await mammoth.extractRawText({ arrayBuffer });
       if (result.value && result.value.trim().length > 0) {
-        return result.value.trim();
+        const text = result.value.trim();
+        console.log(`[CampusSync Parser] Parsed DOCX "${file.name}" (${text.length} chars).`);
+        return text;
       }
       throw new Error("Word document appears to be empty.");
     } catch (err: any) {
@@ -136,24 +145,27 @@ export async function extractTextFromFile(
     fileType.startsWith("image/") ||
     /\.(png|jpe?g|webp|bmp|gif)$/i.test(fileName)
   ) {
-    onProgress?.("Initializing OCR engine (Tesseract.js)…");
+    onProgress?.(`Initializing OCR engine for ${file.name}…`);
     try {
       const worker = await createWorker("eng");
-      onProgress?.("Analyzing image text with OCR…");
+      onProgress?.(`Extracting text from ${file.name} with OCR…`);
       const ret = await worker.recognize(file);
       await worker.terminate();
-      const text = ret.data.text || "";
-      if (text.trim().length > 0) {
-        return text.trim();
+
+      const text = (ret.data.text || "").trim();
+      console.log(`[CampusSync OCR] Extracted text from "${file.name}":\n`, text);
+
+      if (text.length > 0) {
+        return text;
       }
-      throw new Error("No text detected in the uploaded image.");
+      throw new Error(`No text detected in "${file.name}". Please ensure image is clear and legible.`);
     } catch (err: any) {
-      console.error("Tesseract OCR failed:", err);
-      throw new Error(err.message || "Unable to perform OCR on image. Ensure image is clear.");
+      console.error(`[CampusSync OCR] Failed on "${file.name}":`, err);
+      throw new Error(err.message || `Unable to perform OCR on ${file.name}.`);
     }
   }
 
-  throw new Error(`Unsupported file format or unreadable file: ${file.name}`);
+  throw new Error(`Unsupported file format: ${file.name}`);
 }
 
 /**
@@ -172,11 +184,11 @@ export async function extractTextFromFiles(
     try {
       const text = await extractTextFromFile(file, onProgress);
       if (text.trim().length > 0) {
-        parts.push(`--- ${file.name} ---\n${text.trim()}`);
+        parts.push(`--- Notes from ${file.name} ---\n${text.trim()}`);
       }
     } catch (err: any) {
-      console.warn(`Skipping ${file.name}:`, err.message);
-      onProgress?.(`⚠️ Could not extract text from ${file.name}, skipping…`);
+      console.warn(`[CampusSync Parser] Skipping ${file.name}:`, err.message);
+      onProgress?.(`⚠️ Could not extract text from ${file.name}: ${err.message}`);
     }
   }
 
@@ -184,5 +196,9 @@ export async function extractTextFromFiles(
     throw new Error("No readable text could be extracted from any of the uploaded files.");
   }
 
-  return parts.join("\n\n");
+  const combined = parts.join("\n\n");
+  console.log(
+    `[CampusSync OCR] Completed extraction of ${parts.length} file(s). Total extracted length: ${combined.length} characters.`
+  );
+  return combined;
 }

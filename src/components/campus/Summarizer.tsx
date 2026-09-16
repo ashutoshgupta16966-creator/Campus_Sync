@@ -1,4 +1,4 @@
-import { useRef, useState, useCallback } from "react";
+import { useRef, useState, useCallback, useEffect } from "react";
 import { toast } from "sonner";
 import {
   Sparkles,
@@ -15,9 +15,18 @@ import {
   Lightbulb,
   Brain,
   AlignLeft,
+  Key,
+  CheckCircle2,
+  AlertCircle,
+  ExternalLink,
 } from "lucide-react";
 import { extractTextFromFiles } from "@/lib/fileParser";
-import { generateSummaryFromText, type SummaryResult } from "@/lib/summarizerEngine";
+import {
+  generateSummaryFromText,
+  getGeminiApiKey,
+  setGeminiApiKey,
+  type SummaryResult,
+} from "@/lib/summarizerEngine";
 
 const ACCEPTED = ".pdf,.txt,.png,.jpg,.jpeg,.webp,.doc,.docx";
 const ACCEPTED_LABEL = "PDF, TXT, DOC, PNG, JPG, WEBP";
@@ -51,6 +60,19 @@ export function Summarizer() {
   const [dragging, setDragging] = useState(false);
   const [uploadedFiles, setUploadedFiles] = useState<File[]>([]);
 
+  // API Key management
+  const [apiKey, setApiKey] = useState("");
+  const [showKeyModal, setShowKeyModal] = useState(false);
+  const [keyInput, setKeyInput] = useState("");
+
+  useEffect(() => {
+    const existing = getGeminiApiKey();
+    if (existing) {
+      setApiKey(existing);
+      setKeyInput(existing);
+    }
+  }, []);
+
   const fileInputRef = useRef<HTMLInputElement>(null);
   const cameraInputRef = useRef<HTMLInputElement>(null);
 
@@ -76,14 +98,39 @@ export function Summarizer() {
     setSummary(null);
   };
 
+  const handleSaveApiKey = () => {
+    const trimmed = keyInput.trim();
+    setGeminiApiKey(trimmed);
+    setApiKey(trimmed);
+    setShowKeyModal(false);
+    if (trimmed) {
+      toast.success("Gemini API Key saved", {
+        description: "Your key is active for summarizing notes.",
+      });
+    } else {
+      toast.info("Gemini API Key removed");
+    }
+  };
+
   // ── main processing ────────────────────────────────────────────────────
 
   const processAndSummarize = async (filesToProcess: File[], textFallback: string) => {
     let combinedText = textFallback.trim();
 
+    // 1. Check API Key first
+    const activeKey = apiKey.trim() || getGeminiApiKey();
+    if (!activeKey) {
+      setShowKeyModal(true);
+      toast.error("Gemini API Key Required", {
+        description: "Please enter your Gemini API key to activate AI summarization.",
+      });
+      return;
+    }
+
+    // 2. Extract text if files are uploaded
     if (filesToProcess.length > 0) {
       setParsing(true);
-      setParseStatus(`Reading ${filesToProcess.length} file${filesToProcess.length > 1 ? "s" : ""}…`);
+      setParseStatus(`Extracting text from ${filesToProcess.length} file${filesToProcess.length > 1 ? "s" : ""}…`);
       try {
         const extracted = await extractTextFromFiles(filesToProcess, (status) => {
           setParseStatus(status);
@@ -91,11 +138,11 @@ export function Summarizer() {
         combinedText = extracted + (textFallback ? "\n\n" + textFallback : "");
         setNotes(combinedText);
         toast.success("Text extracted", {
-          description: `Parsed ${filesToProcess.length} file${filesToProcess.length > 1 ? "s" : ""}. Generating summary…`,
+          description: `Extracted ${filesToProcess.length} file${filesToProcess.length > 1 ? "s" : ""}. Sending to Gemini…`,
         });
       } catch (err: any) {
         setParsing(false);
-        toast.error("Extraction failed", {
+        toast.error("Text extraction failed", {
           description: err.message || "Could not extract text from uploaded files.",
         });
         return;
@@ -111,16 +158,28 @@ export function Summarizer() {
       return;
     }
 
+    // 3. Call Gemini AI Summarizer
     setLoading(true);
-    // Use rAF to allow UI to update before CPU-heavy work
-    requestAnimationFrame(() => {
-      setTimeout(() => {
-        const result = generateSummaryFromText(combinedText);
-        setSummary(result);
-        setLoading(false);
-        toast.success("Summary ready!", { description: "Study cards generated from your content." });
-      }, 50);
-    });
+    setParseStatus("Sending extracted content to Gemini AI…");
+
+    try {
+      const result = await generateSummaryFromText(
+        combinedText,
+        activeKey,
+        (status) => setParseStatus(status)
+      );
+      setSummary(result);
+      toast.success("Summary ready!", {
+        description: "High-yield study cards generated from your notes.",
+      });
+    } catch (err: any) {
+      console.error("[CampusSync Summarizer] Error:", err);
+      toast.error("AI Summarization Failed", {
+        description: err.message || "Failed to generate summary with Gemini.",
+      });
+    } finally {
+      setLoading(false);
+    }
   };
 
   const handleGenerate = () => {
@@ -147,7 +206,7 @@ export function Summarizer() {
       "💡 IMPORTANT DEFINITIONS / FORMULAS",
       ...summary.formulas.map((f) => `${f.name}: ${f.body}`),
       "",
-      "🧠 EXAM / REVISION SUMMARY",
+      "🧠 REVISION NOTES",
       ...summary.examPoints.map((p) => `• ${p}`),
     ];
     navigator.clipboard?.writeText(lines.join("\n")).catch(() => {});
@@ -160,21 +219,43 @@ export function Summarizer() {
     <div className="space-y-6">
       {/* ── Input Block ── */}
       <div className="glass rounded-3xl p-5 sm:p-7 space-y-4">
-        <div className="flex items-start justify-between gap-4">
+        <div className="flex flex-wrap items-start justify-between gap-4">
           <div>
             <h2 className="text-xl font-semibold">AI Notes Summarizer</h2>
             <p className="mt-1 text-sm text-muted-foreground">
-              Upload files, snap notes with your camera, or paste text — get structured study cards instantly.
+              Upload files, snap notes with your camera, or paste text — powered by Google Gemini AI.
             </p>
           </div>
-          {(uploadedFiles.length > 0 || notes || summary) && (
+
+          <div className="flex items-center gap-2">
             <button
-              onClick={clearAll}
-              className="shrink-0 flex items-center gap-1.5 rounded-full border border-border px-3 py-1.5 text-xs text-muted-foreground hover:border-destructive/50 hover:text-destructive transition"
+              onClick={() => setShowKeyModal(true)}
+              className={
+                "flex items-center gap-1.5 rounded-full border px-3 py-1.5 text-xs font-medium transition " +
+                (apiKey
+                  ? "border-primary/40 bg-primary/10 text-primary-glow hover:bg-primary/20"
+                  : "border-amber-500/40 bg-amber-500/10 text-amber-400 hover:bg-amber-500/20")
+              }
+              title={apiKey ? "Gemini API key configured" : "Click to configure Gemini API Key"}
             >
-              <X className="size-3" /> Clear all
+              <Key className="size-3.5" />
+              <span>{apiKey ? "Gemini Active" : "Set API Key"}</span>
+              {apiKey ? (
+                <CheckCircle2 className="size-3 text-emerald-400" />
+              ) : (
+                <AlertCircle className="size-3 text-amber-400" />
+              )}
             </button>
-          )}
+
+            {(uploadedFiles.length > 0 || notes || summary) && (
+              <button
+                onClick={clearAll}
+                className="shrink-0 flex items-center gap-1.5 rounded-full border border-border px-3 py-1.5 text-xs text-muted-foreground hover:border-destructive/50 hover:text-destructive transition"
+              >
+                <X className="size-3" /> Clear all
+              </button>
+            )}
+          </div>
         </div>
 
         {/* ── Dropzone ── */}
@@ -217,7 +298,7 @@ export function Summarizer() {
             Drag & drop or click to upload files
           </p>
           <p className="mt-0.5 text-xs text-muted-foreground">
-            {ACCEPTED_LABEL} — multiple files supported
+            {ACCEPTED_LABEL} — multiple documents & images supported
           </p>
         </div>
 
@@ -239,8 +320,8 @@ export function Summarizer() {
           </div>
         )}
 
-        {/* ── Parse status bar ── */}
-        {parsing && (
+        {/* ── Parse / AI status bar ── */}
+        {(parsing || loading) && (
           <div className="flex items-center gap-2 rounded-xl border border-border bg-secondary/40 px-4 py-2.5 text-xs text-muted-foreground">
             <Loader2 className="size-3.5 animate-spin text-primary-glow" />
             <span>{parseStatus}</span>
@@ -250,13 +331,13 @@ export function Summarizer() {
         {/* ── Notes textarea ── */}
         <div>
           <label className="mb-1.5 block text-xs font-semibold uppercase tracking-wider text-muted-foreground">
-            Or paste / edit notes manually
+            Extracted text / manual notes
           </label>
           <textarea
             value={notes}
             onChange={(e) => setNotes(e.target.value)}
             rows={7}
-            placeholder="Paste lecture notes, textbook paragraphs, or any study material here…"
+            placeholder="Parsed text from your uploaded documents or camera scans will appear here, or paste your notes directly…"
             className="w-full resize-y rounded-2xl border border-border bg-secondary/40 p-4 text-sm outline-none transition focus:border-primary focus:ring-2 focus:ring-ring/40"
           />
         </div>
@@ -273,7 +354,7 @@ export function Summarizer() {
             ) : (
               <Sparkles className="size-4" />
             )}
-            {parsing ? "Extracting Text…" : loading ? "Summarizing…" : "Generate Summary"}
+            {parsing ? "Extracting Text…" : loading ? "Generating AI Summary…" : "Generate Summary"}
           </button>
 
           {summary && (
@@ -287,15 +368,79 @@ export function Summarizer() {
         </div>
       </div>
 
+      {/* ── API Key Modal ── */}
+      {showKeyModal && (
+        <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/60 backdrop-blur-xs p-4">
+          <div className="glass w-full max-w-md rounded-3xl p-6 shadow-2xl border border-border bg-card">
+            <div className="flex items-center justify-between">
+              <div className="flex items-center gap-2 text-primary-glow">
+                <Key className="size-5" />
+                <h3 className="text-lg font-semibold text-foreground">Gemini API Key</h3>
+              </div>
+              <button
+                onClick={() => setShowKeyModal(false)}
+                className="rounded-full p-1 text-muted-foreground hover:bg-secondary hover:text-foreground"
+              >
+                <X className="size-4" />
+              </button>
+            </div>
+
+            <p className="mt-2 text-xs text-muted-foreground leading-relaxed">
+              CampusSync uses Google Gemini AI to analyze your notes, formulas, and documents accurately.
+              Your key is stored securely in your local browser storage.
+            </p>
+
+            <div className="mt-4 space-y-2">
+              <label className="block text-xs font-semibold uppercase tracking-wider text-muted-foreground">
+                Google Gemini API Key
+              </label>
+              <input
+                type="password"
+                value={keyInput}
+                onChange={(e) => setKeyInput(e.target.value)}
+                placeholder="AIzaSy..."
+                className="w-full rounded-xl border border-border bg-secondary/50 px-3.5 py-2.5 text-sm outline-none transition focus:border-primary focus:ring-2 focus:ring-ring/40"
+              />
+            </div>
+
+            <div className="mt-3 flex items-center justify-between text-xs text-muted-foreground">
+              <a
+                href="https://aistudio.google.com/app/apikey"
+                target="_blank"
+                rel="noreferrer"
+                className="inline-flex items-center gap-1 text-primary-glow hover:underline"
+              >
+                Get a free key from Google AI Studio <ExternalLink className="size-3" />
+              </a>
+            </div>
+
+            <div className="mt-6 flex justify-end gap-2">
+              <button
+                onClick={() => setShowKeyModal(false)}
+                className="rounded-full border border-border px-4 py-2 text-xs font-medium text-muted-foreground hover:bg-secondary"
+              >
+                Cancel
+              </button>
+              <button
+                onClick={handleSaveApiKey}
+                className="rounded-full bg-primary px-5 py-2 text-xs font-semibold text-primary-foreground hover:opacity-90 transition"
+              >
+                Save Key
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
+
       {/* ── Loading overlay ── */}
       {(loading || parsing) && !summary && (
         <div className="glass flex flex-col items-center justify-center rounded-3xl p-14 text-center">
           <Loader2 className="size-8 animate-spin text-primary-glow" />
           <p className="mt-4 font-medium text-foreground">
-            {parsing ? parseStatus : "Analysing your notes and building study cards…"}
+            {parsing ? parseStatus : "Sending to Gemini AI and structuring study cards…"}
           </p>
           <p className="mt-1 text-xs text-muted-foreground">
-            Identifying key concepts, definitions, formulas, and exam points…
+            Accurately extracting key concepts, step-by-step breakdown, formulas, and revision points…
           </p>
         </div>
       )}
@@ -336,7 +481,7 @@ export function Summarizer() {
               <AlignLeft className="size-5" />
               <h3 className="font-semibold">📌 Quick Overview</h3>
             </div>
-            <p className="mt-3 text-sm leading-relaxed text-muted-foreground">
+            <p className="mt-3 text-sm leading-relaxed text-muted-foreground whitespace-pre-line">
               {summary.overview}
             </p>
           </div>
@@ -355,12 +500,12 @@ export function Summarizer() {
                       <span className="flex size-5 shrink-0 items-center justify-center rounded-full bg-primary/20 text-[10px] font-bold text-primary-glow">
                         {i + 1}
                       </span>
-                      <span>{t}</span>
+                      <span className="leading-relaxed">{t}</span>
                     </li>
                   ))}
                 </ol>
               ) : (
-                <p className="mt-3 text-xs text-muted-foreground">No key concepts extracted — try adding more detailed notes.</p>
+                <p className="mt-3 text-xs text-muted-foreground">No key concepts extracted.</p>
               )}
             </div>
 
@@ -382,35 +527,35 @@ export function Summarizer() {
                   ))}
                 </ul>
               ) : (
-                <p className="mt-3 text-xs text-muted-foreground">No explicit formulas or definitions detected. Try including equations or "Term: definition" lines.</p>
+                <p className="mt-3 text-xs text-muted-foreground">No explicit definitions or formulas detected.</p>
               )}
             </div>
           </div>
 
-          {/* 🧠 Exam / Revision Summary */}
+          {/* 🧠 Revision Notes */}
           <div className="glass rounded-3xl p-6">
             <div className="flex items-center gap-2 text-primary-glow">
               <Brain className="size-5" />
-              <h3 className="font-semibold">🧠 Exam / Revision Summary</h3>
+              <h3 className="font-semibold">🧠 Revision Notes</h3>
             </div>
             {summary.examPoints.length > 0 ? (
-              <ul className="mt-4 grid gap-2 sm:grid-cols-2">
+              <ul className="mt-4 grid gap-2.5 sm:grid-cols-2">
                 {summary.examPoints.map((p, i) => (
                   <li key={i} className="flex gap-2 text-sm text-muted-foreground">
                     <span className="mt-1.5 size-1.5 shrink-0 rounded-full bg-primary-glow" />
-                    <span>{p}</span>
+                    <span className="leading-relaxed">{p}</span>
                   </li>
                 ))}
               </ul>
             ) : (
-              <p className="mt-3 text-xs text-muted-foreground">Not enough content for revision points — add more detailed notes.</p>
+              <p className="mt-3 text-xs text-muted-foreground">No revision points extracted.</p>
             )}
           </div>
 
           {/* Export button */}
           <div className="flex justify-center">
             <button
-              onClick={() => toast.info("PDF Export", { description: "Summary formatted for print/download." })}
+              onClick={() => toast.info("PDF Export", { description: "Summary ready for download/print." })}
               className="inline-flex items-center gap-2 rounded-full border border-primary/40 bg-primary/15 px-6 py-3 text-sm font-semibold text-primary-glow transition hover:bg-primary/25"
             >
               <FileDown className="size-4" /> Export Summary as PDF

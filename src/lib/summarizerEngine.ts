@@ -7,202 +7,343 @@ export interface SummaryResult {
   overview: string;          // 📌 Quick Overview
   takeaways: string[];       // 🔑 Key Concepts & Takeaways
   formulas: FormulaItem[];   // 💡 Important Definitions / Formulas
-  examPoints: string[];      // 🧠 Exam/Revision Summary
+  examPoints: string[];      // 🧠 Revision Notes
+  rawMarkdown?: string;      // Raw Gemini response
 }
 
-// ─── helpers ────────────────────────────────────────────────────────────────
+const STORAGE_KEY = "campus_sync_gemini_api_key";
 
-/** Split text into clean sentences. */
-function splitSentences(text: string): string[] {
-  return text
-    .replace(/\r\n|\r/g, "\n")
-    .split(/(?<=[.!?])\s+|\n{2,}/)
-    .map((s) => s.replace(/^[\s\-•*►▶→\d+.\)]+/, "").trim())
-    .filter((s) => s.length > 20);
-}
+/**
+ * Retrieves the Gemini API Key from environment or localStorage.
+ */
+export function getGeminiApiKey(): string | null {
+  // 1. Vite environment variable
+  try {
+    const envKey =
+      (import.meta as any).env?.VITE_GEMINI_API_KEY ||
+      (import.meta as any).env?.GEMINI_API_KEY;
 
-/** Split text into lines. */
-function splitLines(text: string): string[] {
-  return text
-    .split(/\n/)
-    .map((l) => l.replace(/^[\s\-•*►▶→\d+.\)]+/, "").trim())
-    .filter((l) => l.length > 5);
+    if (
+      envKey &&
+      typeof envKey === "string" &&
+      envKey.trim().length > 0 &&
+      !envKey.includes("your_google_gemini_api_key")
+    ) {
+      return envKey.trim();
+    }
+  } catch {}
+
+  // 2. Browser localStorage
+  if (typeof window !== "undefined") {
+    try {
+      const localKey = window.localStorage.getItem(STORAGE_KEY);
+      if (localKey && localKey.trim().length > 0) {
+        return localKey.trim();
+      }
+    } catch {}
+  }
+
+  return null;
 }
 
 /**
- * Score a sentence for informational density.
- * Higher = more likely to be a key concept.
+ * Stores the Gemini API Key in browser localStorage.
  */
-function scoreSentence(s: string): number {
-  let score = 0;
-  const lower = s.toLowerCase();
-
-  // Concept-defining patterns
-  if (/\b(is defined as|refers to|means that|is called|is known as)\b/i.test(s)) score += 4;
-  if (/\b(is|are|was|were)\b/i.test(s)) score += 1;
-  if (/\b(therefore|thus|hence|as a result|consequently|because|since)\b/i.test(s)) score += 2;
-  if (/\b(first|second|third|finally|lastly|step|phase|stage)\b/i.test(s)) score += 2;
-  if (/\b(important|key|critical|essential|fundamental|main|primary|major)\b/i.test(s)) score += 3;
-  if (/\b(theorem|law|principle|rule|formula|equation|concept|theory)\b/i.test(s)) score += 3;
-  if (/\b(algorithm|process|method|technique|approach|procedure)\b/i.test(s)) score += 2;
-  if (/\d/.test(s)) score += 1; // Contains numbers
-
-  // Penalise very short or very long sentences
-  const words = s.split(/\s+/).length;
-  if (words < 5) score -= 2;
-  if (words > 50) score -= 1;
-
-  return score;
+export function setGeminiApiKey(key: string): void {
+  if (typeof window !== "undefined") {
+    try {
+      if (!key || !key.trim()) {
+        window.localStorage.removeItem(STORAGE_KEY);
+      } else {
+        window.localStorage.setItem(STORAGE_KEY, key.trim());
+      }
+    } catch {}
+  }
 }
 
-/** Detect definition / formula lines. */
-function extractDefinitionsAndFormulas(text: string): FormulaItem[] {
-  const results: FormulaItem[] = [];
-  const seen = new Set<string>();
+/**
+ * Cleans leading bullet, numbering, or icon prefix from a line.
+ */
+function cleanPrefix(line: string): string {
+  return line.replace(/^\s*(?:[-•*►▶→]|\d+[\.\)])\s*/, "").trim();
+}
 
-  const lines = splitLines(text);
-  const mathSymbol = /[=∫∑Δηπ√±×÷^≈≠≤≥∝∂∞]/;
+/**
+ * Parses structured markdown or JSON returned by Gemini into a clean SummaryResult.
+ */
+export function parseSummaryResponse(rawText: string): SummaryResult {
+  const text = rawText.replace(/\r\n/g, "\n").trim();
 
-  for (const line of lines) {
-    if (results.length >= 5) break;
-    if (line.length > 150) continue;
-
-    // Pattern 1: "Term = expression" or "Term: expression"
-    const colonEq = line.match(/^([^:=]{3,35})\s*[:=]\s*(.{5,80})$/);
-    if (colonEq) {
-      const name = colonEq[1].trim();
-      const body = colonEq[2].trim();
-      if (!seen.has(name.toLowerCase()) && (mathSymbol.test(body) || body.length > 8)) {
-        seen.add(name.toLowerCase());
-        results.push({ name, body });
-        continue;
+  // 1. Check if Gemini returned JSON
+  try {
+    const jsonMatch = text.match(/```(?:json)?\s*([\s\S]*?)\s*```/i) || text.match(/^\{[\s\S]*\}$/);
+    const candidate = jsonMatch ? (jsonMatch[1] || jsonMatch[0]) : text;
+    if (candidate.startsWith("{")) {
+      const parsed = JSON.parse(candidate);
+      if (parsed.overview || parsed.takeaways) {
+        return {
+          overview: parsed.overview || "",
+          takeaways: Array.isArray(parsed.takeaways) ? parsed.takeaways : [],
+          formulas: Array.isArray(parsed.formulas)
+            ? parsed.formulas.map((f: any) => ({
+                name: typeof f === "string" ? f : f.name || "Formula",
+                body: typeof f === "string" ? "" : f.body || f.formula || f.definition || "",
+              }))
+            : [],
+          examPoints: Array.isArray(parsed.examPoints || parsed.revisionNotes)
+            ? (parsed.examPoints || parsed.revisionNotes)
+            : [],
+          rawMarkdown: text,
+        };
       }
     }
+  } catch {}
 
-    // Pattern 2: lines with clear math symbols
-    if (mathSymbol.test(line) && line.length < 100) {
-      const parts = line.split(/[:=]/);
-      const name = parts.length >= 2 ? parts[0].trim().slice(0, 35) : "Key Equation";
-      const body = parts.length >= 2 ? parts.slice(1).join("=").trim().slice(0, 80) : line.slice(0, 80);
-      if (!seen.has(name.toLowerCase())) {
-        seen.add(name.toLowerCase());
-        results.push({ name, body });
-        continue;
-      }
-    }
+  // 2. Parse structured Markdown sections
+  const sectionHeaders = [
+    { key: "overview", regex: /(?:^|\n)(?:#+\s*)?(?:\*\*)?(?:📌\s*)?Quick Overview(?:\*\*)?:?/i },
+    { key: "takeaways", regex: /(?:^|\n)(?:#+\s*)?(?:\*\*)?(?:🔑\s*)?Key Concepts(?:\s*(?:&|and)\s*Takeaways)?(?:\*\*)?:?/i },
+    { key: "formulas", regex: /(?:^|\n)(?:#+\s*)?(?:\*\*)?(?:💡\s*)?Important Definitions(?:\s*(?:\/|&|and)\s*Formulas)?(?:\*\*)?:?/i },
+    { key: "examPoints", regex: /(?:^|\n)(?:#+\s*)?(?:\*\*)?(?:🧠\s*)?(?:Revision Notes|Exam(?:\s*(?:\/|&|and)\s*)?Revision Summary)(?:\*\*)?:?/i },
+  ];
 
-    // Pattern 3: "Term is/means/refers to ..." definition
-    const defMatch = line.match(/^([A-Z][a-zA-Z\s]{2,30})\s+(?:is|means|refers to|denotes|represents)\s+(.{10,100})/);
-    if (defMatch) {
-      const name = defMatch[1].trim();
-      const body = defMatch[2].trim().replace(/\.$/, "");
-      if (!seen.has(name.toLowerCase())) {
-        seen.add(name.toLowerCase());
-        results.push({ name, body });
-      }
+  const matches: { key: string; index: number; matchLength: number }[] = [];
+  for (const sh of sectionHeaders) {
+    const m = text.match(sh.regex);
+    if (m && m.index !== undefined) {
+      matches.push({ key: sh.key, index: m.index, matchLength: m[0].length });
     }
   }
 
-  return results;
-}
+  matches.sort((a, b) => a.index - b.index);
 
-/** Generate a 2–3 line overview from the most informative sentences. */
-function buildOverview(sentences: string[]): string {
-  const scored = sentences
-    .map((s) => ({ s, score: scoreSentence(s) }))
-    .sort((a, b) => b.score - a.score);
-
-  const picks = scored
-    .slice(0, 3)
-    .map((x) => x.s.replace(/\s+/g, " ").trim())
-    .filter((s) => s.length > 15);
-
-  if (picks.length === 0) {
-    return sentences.slice(0, 2).join(" ").slice(0, 200) + "…";
+  const rawSections: Record<string, string> = {};
+  for (let i = 0; i < matches.length; i++) {
+    const current = matches[i];
+    const startIndex = current.index + current.matchLength;
+    const endIndex = i + 1 < matches.length ? matches[i + 1].index : text.length;
+    rawSections[current.key] = text.slice(startIndex, endIndex).trim();
   }
-  return picks.join(" ").slice(0, 350);
-}
 
-/** Extract top-N most informative sentences as key takeaways. */
-function buildTakeaways(sentences: string[], n = 6): string[] {
-  const scored = sentences
-    .map((s) => ({ s, score: scoreSentence(s) }))
-    .sort((a, b) => b.score - a.score);
+  // 1. Overview
+  const overview = (rawSections["overview"] || "")
+    .replace(/^[-•*]\s*/, "")
+    .trim();
 
-  const seen = new Set<string>();
-  const picks: string[] = [];
+  // 2. Takeaways (Step-by-step numbered breakdown)
+  const takeawaysRaw = rawSections["takeaways"] || "";
+  const takeaways = takeawaysRaw
+    .split(/\n+/)
+    .map((line) => cleanPrefix(line))
+    .filter((line) => line.length > 5);
 
-  for (const { s } of scored) {
-    if (picks.length >= n) break;
-    const key = s.slice(0, 40).toLowerCase();
-    if (!seen.has(key)) {
-      seen.add(key);
-      const clean = s.replace(/\s+/g, " ").trim();
-      picks.push(clean.endsWith(".") ? clean : clean + ".");
+  // 3. Definitions & Formulas
+  const formulasRaw = rawSections["formulas"] || "";
+  const formulas: FormulaItem[] = [];
+  formulasRaw.split(/\n+/).forEach((line) => {
+    const clean = cleanPrefix(line);
+    if (!clean || clean.length < 3) return;
+
+    const splitIdx = clean.indexOf(":");
+    const splitEq = clean.indexOf("=");
+    let splitPos = -1;
+    if (splitIdx > 0 && splitEq > 0) splitPos = Math.min(splitIdx, splitEq);
+    else if (splitIdx > 0) splitPos = splitIdx;
+    else if (splitEq > 0) splitPos = splitEq;
+
+    if (splitPos > 0 && splitPos < 45) {
+      const name = clean.slice(0, splitPos).replace(/[*_]/g, "").trim();
+      const body = clean.slice(splitPos + 1).replace(/^[:=]\s*/, "").replace(/^[*_]+|[*_]+$/g, "").trim();
+      formulas.push({ name, body });
+    } else {
+      formulas.push({ name: "Core Concept", body: clean.replace(/[*_]/g, "") });
     }
-  }
+  });
 
-  // Fallback: use first N sentences
-  if (picks.length < 3) {
-    for (const s of sentences) {
-      if (picks.length >= n) break;
-      const clean = s.replace(/\s+/g, " ").trim();
-      const ending = clean.endsWith(".") ? clean : clean + ".";
-      if (!picks.includes(ending)) picks.push(ending);
-    }
-  }
+  // 4. Revision Notes
+  const examPointsRaw = rawSections["examPoints"] || "";
+  const examPoints = examPointsRaw
+    .split(/\n+/)
+    .map((line) => cleanPrefix(line))
+    .filter((line) => line.length > 5);
 
-  return picks;
-}
-
-/** Build short exam/revision bullet points. */
-function buildExamPoints(sentences: string[], formulas: FormulaItem[]): string[] {
-  const points: string[] = [];
-
-  // Add formula-based points
-  for (const f of formulas.slice(0, 3)) {
-    points.push(`${f.name}: ${f.body}`);
-  }
-
-  // High-signal sentences kept SHORT (≤ 15 words)
-  const scored = sentences
-    .map((s) => ({ s, score: scoreSentence(s) }))
-    .sort((a, b) => b.score - a.score);
-
-  for (const { s } of scored) {
-    if (points.length >= 7) break;
-    const words = s.split(/\s+/);
-    if (words.length <= 20) {
-      const clean = s.replace(/\s+/g, " ").trim();
-      const point = clean.endsWith(".") ? clean : clean + ".";
-      if (!points.some((p) => p.startsWith(point.slice(0, 30)))) {
-        points.push(point);
-      }
-    }
-  }
-
-  return points.slice(0, 7);
-}
-
-// ─── main export ─────────────────────────────────────────────────────────────
-
-export function generateSummaryFromText(notes: string): SummaryResult {
-  const cleanNotes = notes.trim().replace(/[ \t]+/g, " ");
-
-  if (!cleanNotes || cleanNotes.length < 20) {
+  // Fallback if formatting was non-standard but model produced text
+  if (!overview && !takeaways.length && !formulas.length && !examPoints.length) {
+    const paragraphs = text.split(/\n{2,}/).map((p) => p.trim()).filter(Boolean);
     return {
-      overview: "No meaningful text provided. Please upload a file or paste lecture notes.",
-      takeaways: [],
+      overview: paragraphs[0] || text.slice(0, 300),
+      takeaways: paragraphs.slice(1, 6),
       formulas: [],
-      examPoints: [],
+      examPoints: paragraphs.slice(6, 12),
+      rawMarkdown: text,
     };
   }
 
-  const sentences = splitSentences(cleanNotes);
-  const formulas = extractDefinitionsAndFormulas(cleanNotes);
-  const overview = buildOverview(sentences);
-  const takeaways = buildTakeaways(sentences, 6);
-  const examPoints = buildExamPoints(sentences, formulas);
+  return {
+    overview,
+    takeaways,
+    formulas,
+    examPoints,
+    rawMarkdown: text,
+  };
+}
 
-  return { overview, takeaways, formulas, examPoints };
+const SYSTEM_PROMPT = `You are an expert academic tutor and study assistant for university students.
+Analyze the provided study notes, lecture text, textbook excerpt, or OCR document and generate an accurate, high-yield study summary.
+
+You MUST format your response strictly in clean Markdown with exactly these four section headers:
+
+📌 Quick Overview
+(Provide a concise 2-3 sentence overview explaining what the material is about and its main academic objective.)
+
+🔑 Key Concepts & Takeaways
+(Provide a numbered step-by-step breakdown of the most critical concepts, principles, and mechanisms explained clearly.)
+
+💡 Important Definitions / Formulas
+(List definitions of key terms and mathematical/scientific formulas. Format each item on its own line as:
+Name: Definition or formula body)
+
+🧠 Revision Notes
+(Provide concise bullet points for quick, last-minute exam revision and recall.)
+
+Strict Rules:
+- Base all information strictly on the provided content. Do not hallucinate or add unrelated topics.
+- Do NOT output greeting, introductory filler, or concluding remarks.
+- Only output the 4 sections above.`;
+
+/**
+ * Calls the Google Gemini REST API.
+ */
+async function callGemini(
+  prompt: string,
+  apiKey: string,
+  modelName = "gemini-2.5-flash"
+): Promise<string> {
+  const url = `https://generativelanguage.googleapis.com/v1beta/models/${modelName}:generateContent?key=${encodeURIComponent(apiKey)}`;
+
+  const payload = {
+    contents: [
+      {
+        role: "user",
+        parts: [
+          {
+            text: `${SYSTEM_PROMPT}\n\n---\nDOCUMENT / STUDY NOTES CONTENT:\n${prompt}`,
+          },
+        ],
+      },
+    ],
+    generationConfig: {
+      temperature: 0.2,
+      topP: 0.95,
+      maxOutputTokens: 2500,
+    },
+  };
+
+  const response = await fetch(url, {
+    method: "POST",
+    headers: {
+      "Content-Type": "application/json",
+    },
+    body: JSON.stringify(payload),
+  });
+
+  if (!response.ok) {
+    const errorJson = await response.json().catch(() => null);
+    const apiError = errorJson?.error?.message || response.statusText;
+
+    // If model is unavailable (e.g. 404), fallback to gemini-1.5-flash or gemini-2.0-flash
+    if (response.status === 404 && modelName !== "gemini-1.5-flash") {
+      console.warn(`[CampusSync Gemini] Model ${modelName} returned 404. Trying gemini-1.5-flash...`);
+      return callGemini(prompt, apiKey, "gemini-1.5-flash");
+    }
+
+    throw new Error(`Gemini API error (${response.status}): ${apiError}`);
+  }
+
+  const data = await response.json();
+  const text = data?.candidates?.[0]?.content?.parts?.[0]?.text;
+
+  if (!text || !text.trim()) {
+    throw new Error("Gemini returned an empty response. Please verify your document content.");
+  }
+
+  return text.trim();
+}
+
+/**
+ * Splits text into manageable chunks if content exceeds chunk size limit.
+ */
+function chunkText(text: string, maxChunkSize = 35000): string[] {
+  if (text.length <= maxChunkSize) {
+    return [text];
+  }
+
+  const chunks: string[] = [];
+  const paragraphs = text.split(/\n{2,}/);
+  let currentChunk = "";
+
+  for (const para of paragraphs) {
+    if (currentChunk.length + para.length > maxChunkSize && currentChunk.length > 0) {
+      chunks.push(currentChunk.trim());
+      currentChunk = "";
+    }
+    currentChunk += (currentChunk ? "\n\n" : "") + para;
+  }
+
+  if (currentChunk.trim().length > 0) {
+    chunks.push(currentChunk.trim());
+  }
+
+  return chunks;
+}
+
+/**
+ * Generates an AI summary directly via Gemini API.
+ * Completely removes any mock data, fallback templates, or dummy regex responses.
+ */
+export async function generateSummaryFromText(
+  notes: string,
+  userApiKey?: string,
+  onStatusUpdate?: (status: string) => void
+): Promise<SummaryResult> {
+  const cleanNotes = notes.trim();
+
+  if (!cleanNotes || cleanNotes.length < 10) {
+    throw new Error("No readable text provided. Please upload a file or paste your notes.");
+  }
+
+  const apiKey = userApiKey?.trim() || getGeminiApiKey();
+
+  if (!apiKey) {
+    throw new Error(
+      "Gemini API key is required. Please add VITE_GEMINI_API_KEY in your .env file or click 'API Key' to enter it."
+    );
+  }
+
+  onStatusUpdate?.("Sending extracted content to Gemini AI…");
+
+  const chunks = chunkText(cleanNotes);
+
+  let fullPrompt = cleanNotes;
+
+  // If document is extremely large, summarize individual chunks first before final synthesis
+  if (chunks.length > 1) {
+    console.log(`[CampusSync AI] Document is large (${cleanNotes.length} chars). Processing ${chunks.length} chunks...`);
+    const intermediateSummaries: string[] = [];
+
+    for (let i = 0; i < chunks.length; i++) {
+      onStatusUpdate?.(`Processing chunk ${i + 1} of ${chunks.length} with Gemini…`);
+      const chunkPrompt = `Summarize the essential concepts, definitions, formulas, and revision points from this section (${i + 1} of ${chunks.length}):\n\n${chunks[i]}`;
+      const chunkResult = await callGemini(chunkPrompt, apiKey);
+      intermediateSummaries.push(`--- SECTION ${i + 1} SUMMARY ---\n${chunkResult}`);
+    }
+
+    fullPrompt = `Synthesize these extracted study sections into a single master study guide:\n\n${intermediateSummaries.join("\n\n")}`;
+  }
+
+  onStatusUpdate?.("Generating structured study cards with Gemini…");
+  const rawResponse = await callGemini(fullPrompt, apiKey);
+
+  console.log("[CampusSync AI] Received raw Gemini response successfully.");
+  return parseSummaryResponse(rawResponse);
 }
