@@ -3,6 +3,7 @@ import {
   runServerGeminiSummarizer,
   type SummaryResult,
 } from "./serverSummarizer";
+import { apiUrl, getApiBaseUrl } from "./api";
 
 export type { FormulaItem, SummaryResult } from "./serverSummarizer";
 export { FALLBACK_MODELS } from "./serverSummarizer";
@@ -19,8 +20,8 @@ export const summarizeNotesServerFn = createServerFn({ method: "POST" })
 
 /**
  * Client-facing summarization function.
- * Sends raw extracted notes to the server and returns structured study cards.
- * Never requests, accepts, or transmits any client-side API key.
+ * Sends raw extracted notes to the configured backend API (Render/Vercel)
+ * using import.meta.env.VITE_API_BASE_URL.
  */
 export async function generateSummaryFromText(
   notes: string,
@@ -32,35 +33,51 @@ export async function generateSummaryFromText(
     throw new Error("No readable text provided. Please upload a file or paste your notes.");
   }
 
-  onStatusUpdate?.("Analyzing notes with Gemini on server…");
+  const endpoint = apiUrl("/api/summarize");
+  const hasExternalBackend = Boolean(getApiBaseUrl());
 
-  // Attempt 1: TanStack Start RPC server function
+  // If a separate backend URL is specified (e.g. Render backend), target it directly
+  if (hasExternalBackend) {
+    onStatusUpdate?.("Processing summary via Render backend…");
+    const response = await fetch(endpoint, {
+      method: "POST",
+      headers: {
+        "Content-Type": "application/json",
+      },
+      body: JSON.stringify({ notes: cleanNotes }),
+    });
+
+    if (!response.ok) {
+      const errorJson = await response.json().catch(() => null);
+      const apiError = errorJson?.error || response.statusText;
+      throw new Error(`Backend error (${response.status}): ${apiError}`);
+    }
+
+    return (await response.json()) as SummaryResult;
+  }
+
+  // Local / same-origin environment: try API endpoint first, fallback to ServerFn
+  onStatusUpdate?.("Analyzing notes with Gemini AI…");
   try {
-    const result = await summarizeNotesServerFn({ data: { notes: cleanNotes } });
-    return result;
+    const response = await fetch(endpoint, {
+      method: "POST",
+      headers: {
+        "Content-Type": "application/json",
+      },
+      body: JSON.stringify({ notes: cleanNotes }),
+    });
+
+    if (response.ok) {
+      return (await response.json()) as SummaryResult;
+    }
+  } catch (fetchErr) {
+    console.warn("[CampusSync] Direct API fetch failed, falling back to ServerFn:", fetchErr);
+  }
+
+  // Fallback to internal TanStack Start RPC
+  try {
+    return await summarizeNotesServerFn({ data: { notes: cleanNotes } });
   } catch (rpcErr: any) {
-    console.warn(
-      "[CampusSync] RPC server function call failed, falling back to /api/summarize endpoint:",
-      rpcErr
-    );
+    throw new Error(rpcErr?.message || "Failed to generate summary from backend.");
   }
-
-  // Attempt 2: Direct POST to dedicated server-side /api/summarize endpoint
-  onStatusUpdate?.("Processing summary via server API…");
-  const response = await fetch("/api/summarize", {
-    method: "POST",
-    headers: {
-      "Content-Type": "application/json",
-    },
-    body: JSON.stringify({ notes: cleanNotes }),
-  });
-
-  if (!response.ok) {
-    const errorJson = await response.json().catch(() => null);
-    const apiError = errorJson?.error || response.statusText;
-    throw new Error(`Server error (${response.status}): ${apiError}`);
-  }
-
-  const result = (await response.json()) as SummaryResult;
-  return result;
 }

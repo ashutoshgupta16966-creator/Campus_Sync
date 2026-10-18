@@ -18,6 +18,7 @@ import {
 } from "lucide-react";
 import { extractTextFromFile } from "@/lib/fileParser";
 import { analyzeResumeText, type AtsAnalysisResult } from "@/lib/atsAnalyzer";
+import { apiUrl } from "@/lib/api";
 
 function Gauge({ score }: { score: number }) {
   const r = 78;
@@ -82,7 +83,24 @@ export function AtsChecker() {
       }
 
       setParseStatus("Matching technical skills & computing ATS score…");
-      const analysis = analyzeResumeText(extractedText);
+
+      let analysis: AtsAnalysisResult;
+      try {
+        const endpoint = apiUrl("/api/ats-check");
+        const res = await fetch(endpoint, {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ text: extractedText }),
+        });
+        if (res.ok) {
+          analysis = await res.json();
+        } else {
+          analysis = analyzeResumeText(extractedText);
+        }
+      } catch {
+        analysis = analyzeResumeText(extractedText);
+      }
+
       setResult(analysis);
       toast.success("Analysis complete", {
         description: `Parsed ${analysis.wordCount} words. ATS Score: ${analysis.score} / 100.`,

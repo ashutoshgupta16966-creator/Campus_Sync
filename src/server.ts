@@ -3,6 +3,7 @@ import "./lib/error-capture";
 import { consumeLastCapturedError } from "./lib/error-capture";
 import { renderErrorPage } from "./lib/error-page";
 import { runServerGeminiSummarizer } from "./lib/serverSummarizer";
+import { analyzeResumeText } from "./lib/atsAnalyzer";
 
 type ServerEntry = {
   fetch: (request: Request, env: unknown, ctx: unknown) => Promise<Response> | Response;
@@ -74,6 +75,38 @@ export default {
           headers: { "content-type": "application/json" },
         });
       }
+    }
+
+    // ATS resume checker route
+    if ((url.pathname === "/api/ats-check" || url.pathname === "/api/ats") && request.method === "POST") {
+      try {
+        const body = (await request.json()) as { text?: string };
+        const text = body?.text;
+        if (!text || typeof text !== "string" || !text.trim()) {
+          return new Response(JSON.stringify({ error: "No resume text provided." }), {
+            status: 400,
+            headers: { "content-type": "application/json" },
+          });
+        }
+        const result = analyzeResumeText(text);
+        return new Response(JSON.stringify(result), {
+          status: 200,
+          headers: { "content-type": "application/json" },
+        });
+      } catch (err: any) {
+        return new Response(JSON.stringify({ error: err.message || "Failed to analyze resume" }), {
+          status: 500,
+          headers: { "content-type": "application/json" },
+        });
+      }
+    }
+
+    // Health check route
+    if (url.pathname === "/api/health" && request.method === "GET") {
+      return new Response(JSON.stringify({ status: "ok", service: "CampusSync SSR Backend" }), {
+        status: 200,
+        headers: { "content-type": "application/json" },
+      });
     }
 
     try {
