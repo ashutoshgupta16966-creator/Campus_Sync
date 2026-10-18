@@ -1,8 +1,36 @@
 import express from 'express';
 import cors from 'cors';
+import { createRequire } from 'module';
+import { fileURLToPath } from 'url';
+import { dirname, join, resolve } from 'path';
+import { existsSync, readdirSync } from 'fs';
+
+const __filename = fileURLToPath(import.meta.url);
+const __dirname = dirname(__filename);
 
 const app = express();
 const PORT = process.env.PORT || 10000;
+
+// ─── Static Asset Serving (from Vite/Nitro build output) ─────────────────────
+// Serve compiled frontend assets at /assets/* so the browser can load
+// JS/CSS chunks emitted by `vite build` into .output/public/assets/.
+// This is needed when Render serves both the API and the frontend from the same service.
+const PUBLIC_DIR = resolve(__dirname, '.output', 'public');
+if (existsSync(PUBLIC_DIR)) {
+  // Serve /assets/* with long-term caching headers (hashed filenames)
+  app.use(
+    '/assets',
+    express.static(join(PUBLIC_DIR, 'assets'), {
+      maxAge: '1y',
+      immutable: true,
+    })
+  );
+  // Serve favicon, robots.txt, and other root-level public files
+  app.use(express.static(PUBLIC_DIR, { index: false }));
+  console.log(`[CampusSync Backend] Serving static assets from ${PUBLIC_DIR}`);
+} else {
+  console.log('[CampusSync Backend] No .output/public directory found — API-only mode.');
+}
 
 // Enable CORS for all origins (frontend on Vercel, Render, or localhost)
 app.use(
@@ -17,11 +45,57 @@ app.use(
 app.use(express.json({ limit: '50mb' }));
 app.use(express.urlencoded({ extended: true, limit: '50mb' }));
 
+
 // ─── 1. Health Check Routes ──────────────────────────────────────────────────
 
-app.get('/', (req, res) => {
-  res.send('CampusSync Backend Server is Running!');
-});
+// Build the HTML app shell once at startup and cache it.
+// Reads the hashed asset filenames from .output/public/assets/ so the
+// <script> and <link> tags are always up-to-date after each build.
+let _htmlShell = null;
+function getHtmlShell() {
+  if (_htmlShell) return _htmlShell;
+  if (!existsSync(PUBLIC_DIR)) return null;
+  try {
+    const assetFiles = readdirSync(join(PUBLIC_DIR, 'assets'));
+    const jsFile = assetFiles.find((f) => f.startsWith('index-') && f.endsWith('.js'));
+    const cssFile = assetFiles.find((f) => f.startsWith('styles-') && f.endsWith('.css'));
+    const jsTag = jsFile ? `<script type="module" src="/assets/${jsFile}"></script>` : '';
+    const cssTag = cssFile ? `<link rel="stylesheet" href="/assets/${cssFile}" />` : '';
+    _htmlShell = `<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>CampusSync</title>
+    <link rel="icon" href="/favicon.ico" type="image/x-icon" />
+    ${cssTag}
+  </head>
+  <body>
+    <div id="root"></div>
+    ${jsTag}
+  </body>
+</html>`;
+    return _htmlShell;
+  } catch (e) {
+    console.warn('[CampusSync Backend] Could not build HTML shell:', e.message);
+    return null;
+  }
+}
+
+// Serve the React app shell on the root route (and SPA fallback below).
+// Falls back to a plain-text health string when running in API-only mode.
+function serveRoot(req, res) {
+  const shell = getHtmlShell();
+  if (shell) {
+    res.setHeader('Content-Type', 'text/html; charset=utf-8');
+    res.send(shell);
+  } else {
+    res.send('CampusSync Backend Server is Running!');
+  }
+}
+
+app.get('/', serveRoot);
+
 
 app.get('/api/health', (req, res) => {
   res.json({
@@ -563,9 +637,22 @@ app.post('/api/teammates/invite', (req, res) => {
   return res.json({ success: true, message: `Invite sent to ${student.name}!` });
 });
 
-// ─── 6. 404 & Global Error Handlers ──────────────────────────────────────────
+// ─── 6. SPA Fallback & Error Handlers ─────────────────────────────────────────
 
-app.use((req, res) => {
+// For any non-API GET request (e.g. /dashboard, /summarizer, /ats), serve the
+// React app shell so client-side routing takes over in the browser.
+// API routes and unknown POST/PUT/DELETE still return JSON errors.
+app.use((req, res, next) => {
+  const isApiRoute = req.path.startsWith('/api/');
+  const isGetRequest = req.method === 'GET';
+  if (!isApiRoute && isGetRequest) {
+    const shell = getHtmlShell();
+    if (shell) {
+      res.setHeader('Content-Type', 'text/html; charset=utf-8');
+      return res.status(200).send(shell);
+    }
+  }
+  // Unknown API endpoint or non-GET method → JSON 404
   res.status(404).json({
     error: 'Endpoint not found',
     path: req.originalUrl || req.url,
@@ -582,6 +669,7 @@ app.use((req, res) => {
     ],
   });
 });
+
 
 app.use((err, req, res, next) => {
   console.error('[CampusSync Backend] Uncaught error:', err);

@@ -7,6 +7,10 @@ export default defineConfig({
     server: { entry: "server" },
   },
   vite: {
+    // base must be '/' (absolute) for TanStack Start SSR.
+    // The Nitro manifest injects /assets/... paths into every SSR-rendered page.
+    // Using './' (relative) would break script/stylesheet loading in the browser.
+    base: "/",
     build: {
       rolldownOptions: {
         external: ["is-electron"],
