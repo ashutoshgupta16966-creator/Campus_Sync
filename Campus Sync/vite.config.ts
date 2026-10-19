@@ -12,4 +12,12 @@ export default defineConfig({
     // nitro/vite builds from this
     server: { entry: "server" },
   },
+  vite: {
+    base: "/",
+    build: {
+      rolldownOptions: {
+        external: ["is-electron"],
+      },
+    },
+  },
 });
