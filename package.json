@@ -6,7 +6,8 @@
   "scripts": {
     "dev": "vite dev",
     "start": "node server.js",
-    "build": "vite build",
+    "build": "vite build && node scripts/build-dist.js",
+    "postbuild": "node scripts/build-dist.js",
     "build:dev": "vite build --mode development",
     "preview": "vite preview",
     "lint": "eslint .",
