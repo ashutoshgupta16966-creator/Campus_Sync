@@ -71,7 +71,19 @@ function getHtmlShell() {
     ${cssTag}
   </head>
   <body>
-    <div id="root"></div>
+    <script>
+      window.$_TSR = {
+        buffer: [],
+        router: {
+          matches: [],
+          manifest: { routes: {} },
+        },
+        h() { this.hydrated = true; },
+        e() { this.streamEnded = true; },
+        c() {},
+        p(fn) { fn(); },
+      };
+    </script>
     ${jsTag}
   </body>
 </html>`;
