@@ -42,8 +42,8 @@ CampusSync is an all-in-one web platform designed to streamline student producti
 ├── server.js               # Node.js backend server setup
 ├── tsconfig.json           # TypeScript configuration
 └── vite.config.ts          # Vite build configuration
-~~~
 
+```
 ---
 
 ## 👤 Author
