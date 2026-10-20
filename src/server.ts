@@ -53,17 +53,27 @@ export default {
     // Dedicated server-side API route for summarization
     if (url.pathname === "/api/summarize" && request.method === "POST") {
       try {
-        const body = (await request.json()) as { notes?: string };
+        const body = (await request.json()) as {
+          notes?: string;
+          images?: Array<{ mimeType: string; data: string }>;
+          image?: { mimeType: string; data: string } | string;
+        };
         const notes = body?.notes;
+        const images = body?.images;
+        const image = body?.image;
 
-        if (!notes || typeof notes !== "string" || !notes.trim()) {
-          return new Response(JSON.stringify({ error: "No readable notes text provided." }), {
+        if ((!notes || typeof notes !== "string" || !notes.trim()) && !images && !image) {
+          return new Response(JSON.stringify({ error: "No readable notes or image provided." }), {
             status: 400,
             headers: { "content-type": "application/json" },
           });
         }
 
-        const summary = await runServerGeminiSummarizer(notes);
+        const summary = await runServerGeminiSummarizer({
+          notes: notes || undefined,
+          images: images || undefined,
+          image: image || undefined,
+        });
         return new Response(JSON.stringify(summary), {
           status: 200,
           headers: { "content-type": "application/json" },

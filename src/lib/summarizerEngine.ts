@@ -2,49 +2,60 @@ import { createServerFn } from "@tanstack/react-start";
 import {
   runServerGeminiSummarizer,
   type SummaryResult,
+  type ImageData,
 } from "./serverSummarizer";
 import { apiUrl, getApiBaseUrl } from "./api";
 
-export type { FormulaItem, SummaryResult } from "./serverSummarizer";
-export { FALLBACK_MODELS } from "./serverSummarizer";
+export type { SummaryResult, ImageData, SummarizerInput } from "./serverSummarizer";
+export { FALLBACK_MODELS, EXACT_SYSTEM_PROMPT } from "./serverSummarizer";
 
 /**
  * Server function using TanStack Start's createServerFn.
  * Strictly executes on the server and reads process.env.GEMINI_API_KEY.
  */
 export const summarizeNotesServerFn = createServerFn({ method: "POST" })
-  .validator((data: { notes: string }) => data)
+  .validator((data: { notes?: string | undefined; images?: ImageData[] | undefined }) => data)
   .handler(async ({ data }) => {
-    return await runServerGeminiSummarizer(data.notes);
+    return await runServerGeminiSummarizer({
+      notes: data.notes,
+      images: data.images,
+    });
   });
 
 /**
  * Client-facing summarization function.
- * Sends raw extracted notes to the configured backend API (Render/Vercel)
+ * Sends raw extracted notes and/or base64 image data to the configured backend API
  * using import.meta.env.VITE_API_BASE_URL.
  */
 export async function generateSummaryFromText(
   notes: string,
+  images?: ImageData[],
   onStatusUpdate?: (status: string) => void
 ): Promise<SummaryResult> {
-  const cleanNotes = notes.trim();
+  const cleanNotes = (notes || "").trim();
+  const validImages = Array.isArray(images) ? images.filter((img) => img && img.data) : [];
 
-  if (!cleanNotes || cleanNotes.length < 10) {
-    throw new Error("No readable text provided. Please upload a file or paste your notes.");
+  if (!cleanNotes && validImages.length === 0) {
+    throw new Error("No readable text or image provided. Please upload notes or paste text.");
   }
 
   const endpoint = apiUrl("/api/summarize");
   const hasExternalBackend = Boolean(getApiBaseUrl());
 
+  const payload = {
+    notes: cleanNotes,
+    images: validImages,
+  };
+
   // If a separate backend URL is specified (e.g. Render backend), target it directly
   if (hasExternalBackend) {
-    onStatusUpdate?.("Processing summary via Render backend…");
+    onStatusUpdate?.("Processing notes via Render backend…");
     const response = await fetch(endpoint, {
       method: "POST",
       headers: {
         "Content-Type": "application/json",
       },
-      body: JSON.stringify({ notes: cleanNotes }),
+      body: JSON.stringify(payload),
     });
 
     if (!response.ok) {
@@ -64,7 +75,7 @@ export async function generateSummaryFromText(
       headers: {
         "Content-Type": "application/json",
       },
-      body: JSON.stringify({ notes: cleanNotes }),
+      body: JSON.stringify(payload),
     });
 
     if (response.ok) {
@@ -76,7 +87,7 @@ export async function generateSummaryFromText(
 
   // Fallback to internal TanStack Start RPC
   try {
-    return await summarizeNotesServerFn({ data: { notes: cleanNotes } });
+    return await summarizeNotesServerFn({ data: payload });
   } catch (rpcErr: any) {
     throw new Error(rpcErr?.message || "Failed to generate summary from backend.");
   }

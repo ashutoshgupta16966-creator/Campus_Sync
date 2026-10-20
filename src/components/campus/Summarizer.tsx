@@ -11,15 +11,19 @@ import {
   X,
   FileText,
   Image as ImageIcon,
-  ClipboardList,
-  Lightbulb,
-  Brain,
-  AlignLeft,
+  CheckCircle2,
+  Tag,
+  AlertTriangle,
 } from "lucide-react";
-import { extractTextFromFiles } from "@/lib/fileParser";
+import {
+  extractTextFromFiles,
+  fileToBase64,
+  isImageFile,
+} from "@/lib/fileParser";
 import {
   generateSummaryFromText,
   type SummaryResult,
+  type ImageData,
 } from "@/lib/summarizerEngine";
 
 const ACCEPTED = ".pdf,.txt,.png,.jpg,.jpeg,.webp,.doc,.docx";
@@ -28,10 +32,14 @@ const ACCEPTED_LABEL = "PDF, TXT, DOC, PNG, JPG, WEBP";
 // ─── FileChip ─────────────────────────────────────────────────────────────
 
 function FileChip({ file, onRemove }: { file: File; onRemove: () => void }) {
-  const isImage = file.type.startsWith("image/");
+  const isImg = isImageFile(file);
   return (
     <div className="flex items-center gap-1.5 rounded-full border border-border bg-secondary/60 pl-2.5 pr-1.5 py-1 text-xs">
-      {isImage ? <ImageIcon className="size-3 text-primary-glow" /> : <FileText className="size-3 text-primary-glow" />}
+      {isImg ? (
+        <ImageIcon className="size-3 text-primary-glow" />
+      ) : (
+        <FileText className="size-3 text-primary-glow" />
+      )}
       <span className="max-w-[140px] truncate font-medium">{file.name}</span>
       <button
         onClick={onRemove}
@@ -43,7 +51,7 @@ function FileChip({ file, onRemove }: { file: File; onRemove: () => void }) {
   );
 }
 
-// ─── Summarizer ───────────────────────────────────────────────────────────
+// ─── Summarizer Component ─────────────────────────────────────────────────
 
 export function Summarizer() {
   const [notes, setNotes] = useState("");
@@ -83,24 +91,27 @@ export function Summarizer() {
 
   const processAndSummarize = async (filesToProcess: File[], textFallback: string) => {
     let combinedText = textFallback.trim();
+    const imagesToProcess: ImageData[] = [];
 
-    // Extract text if files are uploaded
-    if (filesToProcess.length > 0) {
+    const imageFiles = filesToProcess.filter(isImageFile);
+    const docFiles = filesToProcess.filter((f) => !isImageFile(f));
+
+    // 1. Process document files (.pdf, .docx, .txt)
+    if (docFiles.length > 0) {
       setParsing(true);
-      setParseStatus(`Extracting text from ${filesToProcess.length} file${filesToProcess.length > 1 ? "s" : ""}…`);
+      setParseStatus(`Reading ${docFiles.length} document${docFiles.length > 1 ? "s" : ""}…`);
       try {
-        const extracted = await extractTextFromFiles(filesToProcess, (status) => {
+        const extracted = await extractTextFromFiles(docFiles, (status) => {
           setParseStatus(status);
         });
-        combinedText = extracted + (textFallback ? "\n\n" + textFallback : "");
-        setNotes(combinedText);
-        toast.success("Text extracted", {
-          description: `Extracted ${filesToProcess.length} file${filesToProcess.length > 1 ? "s" : ""}. Generating summary…`,
-        });
+        if (extracted) {
+          combinedText = (combinedText ? combinedText + "\n\n" : "") + extracted;
+          setNotes(combinedText);
+        }
       } catch (err: any) {
         setParsing(false);
-        toast.error("Text extraction failed", {
-          description: err.message || "Could not extract text from uploaded files.",
+        toast.error("Document parsing failed", {
+          description: err.message || "Could not read text from uploaded documents.",
         });
         return;
       } finally {
@@ -108,30 +119,65 @@ export function Summarizer() {
       }
     }
 
-    if (!combinedText.trim()) {
-      toast.error("No content to summarize", {
-        description: "Please upload files or paste notes below.",
+    // 2. Prepare images for native Gemini Multimodal Vision API (no dead OCR!)
+    if (imageFiles.length > 0) {
+      setParsing(true);
+      setParseStatus(`Preparing ${imageFiles.length} image scan${imageFiles.length > 1 ? "s" : ""} for Gemini Vision…`);
+      try {
+        const converted = await Promise.all(imageFiles.map((file) => fileToBase64(file)));
+        for (const item of converted) {
+          imagesToProcess.push({
+            mimeType: item.mimeType,
+            data: item.data,
+          });
+        }
+      } catch (err: any) {
+        setParsing(false);
+        toast.error("Image preparation failed", {
+          description: err.message || "Failed to load image file.",
+        });
+        return;
+      } finally {
+        setParsing(false);
+      }
+    }
+
+    if (!combinedText.trim() && imagesToProcess.length === 0) {
+      toast.error("No content to organize", {
+        description: "Please upload an image/document or paste your notes.",
       });
       return;
     }
 
-    // Call server-side Gemini AI Summarizer
+    // 3. Call server-side Gemini AI with strict extraction prompt
     setLoading(true);
-    setParseStatus("Analyzing notes with Gemini AI…");
+    setParseStatus(
+      imagesToProcess.length > 0
+        ? "Analyzing handwritten/printed notes image with Gemini Vision…"
+        : "Extracting points with Gemini AI…"
+    );
 
     try {
       const result = await generateSummaryFromText(
         combinedText,
+        imagesToProcess,
         (status) => setParseStatus(status)
       );
       setSummary(result);
-      toast.success("Summary ready!", {
-        description: "Study cards generated from your notes.",
-      });
+
+      if (result.unreadableMessage) {
+        toast.warning("Unclear notes detected", {
+          description: result.unreadableMessage,
+        });
+      } else {
+        toast.success("Notes organized!", {
+          description: "Strictly extracted visible content without hallucinations.",
+        });
+      }
     } catch (err: any) {
       console.error("[CampusSync Summarizer] Error:", err);
-      toast.error("AI Summarization Failed", {
-        description: err.message || "Failed to generate summary with Gemini.",
+      toast.error("Organizing notes failed", {
+        description: err.message || "Failed to process notes with Gemini.",
       });
     } finally {
       setLoading(false);
@@ -152,21 +198,31 @@ export function Summarizer() {
 
   const copySummary = () => {
     if (!summary) return;
-    const lines = [
-      "📌 QUICK OVERVIEW",
-      summary.overview,
+    if (summary.unreadableMessage) {
+      navigator.clipboard?.writeText(summary.unreadableMessage).catch(() => {});
+      toast.success("Copied to clipboard");
+      return;
+    }
+
+    const lines: string[] = [
+      "## Key Concepts / Topics",
+      ...(summary.keyConcepts.length > 0
+        ? summary.keyConcepts.map((k) => `• ${k}`)
+        : ["(None specified)"]),
       "",
-      "🔑 KEY CONCEPTS & TAKEAWAYS",
-      ...summary.takeaways.map((t, i) => `${i + 1}. ${t}`),
+      "## Important Points",
+      ...(summary.importantPoints.length > 0
+        ? summary.importantPoints.map((p) => `• ${p}`)
+        : ["(None specified)"]),
       "",
-      "💡 IMPORTANT DEFINITIONS / FORMULAS",
-      ...summary.formulas.map((f) => `${f.name}: ${f.body}`),
-      "",
-      "🧠 REVISION NOTES",
-      ...summary.examPoints.map((p) => `• ${p}`),
+      "## Keywords / Terms",
+      ...(summary.keywords.length > 0
+        ? summary.keywords.map((k) => `• ${k}`)
+        : ["(None specified)"]),
     ];
+
     navigator.clipboard?.writeText(lines.join("\n")).catch(() => {});
-    toast.success("Summary copied to clipboard");
+    toast.success("Organized notes copied to clipboard");
   };
 
   // ── render ─────────────────────────────────────────────────────────────
@@ -179,7 +235,7 @@ export function Summarizer() {
           <div>
             <h2 className="text-xl font-semibold">AI Notes Summarizer</h2>
             <p className="mt-1 text-sm text-muted-foreground">
-              Upload files, snap notes with your camera, or paste text — get structured study cards instantly.
+              Upload notes or photo scans — extracts strictly visible content without guessing or hallucinating.
             </p>
           </div>
 
@@ -195,13 +251,18 @@ export function Summarizer() {
 
         {/* ── Dropzone ── */}
         <div
-          onDragOver={(e) => { e.preventDefault(); setDragging(true); }}
+          onDragOver={(e) => {
+            e.preventDefault();
+            setDragging(true);
+          }}
           onDragLeave={() => setDragging(false)}
           onDrop={handleDrop}
           onClick={() => fileInputRef.current?.click()}
           className={
             "flex cursor-pointer flex-col items-center rounded-2xl border-2 border-dashed p-6 text-center transition select-none " +
-            (dragging ? "border-primary bg-primary/5 glow-ring" : "border-border bg-secondary/20 hover:border-primary/50")
+            (dragging
+              ? "border-primary bg-primary/5 glow-ring"
+              : "border-border bg-secondary/20 hover:border-primary/50")
           }
         >
           {/* hidden multi-file input */}
@@ -230,16 +291,19 @@ export function Summarizer() {
             <FileText className="size-7" />
           </div>
           <p className="mt-2 text-sm font-semibold">
-            Drag & drop or click to upload files
+            Drag & drop handwritten or printed notes
           </p>
           <p className="mt-0.5 text-xs text-muted-foreground">
-            {ACCEPTED_LABEL} — multiple documents & images supported
+            {ACCEPTED_LABEL} — Direct multimodal vision enabled
           </p>
         </div>
 
         {/* ── Camera button ── */}
         <button
-          onClick={(e) => { e.stopPropagation(); cameraInputRef.current?.click(); }}
+          onClick={(e) => {
+            e.stopPropagation();
+            cameraInputRef.current?.click();
+          }}
           className="flex w-full items-center justify-center gap-2 rounded-2xl border border-border bg-secondary/30 py-2.5 text-sm font-medium text-muted-foreground transition hover:border-primary/50 hover:text-foreground"
         >
           <Camera className="size-4 text-primary-glow" />
@@ -266,13 +330,13 @@ export function Summarizer() {
         {/* ── Notes textarea ── */}
         <div>
           <label className="mb-1.5 block text-xs font-semibold uppercase tracking-wider text-muted-foreground">
-            Extracted text / manual notes
+            Manual notes / additional text context (optional)
           </label>
           <textarea
             value={notes}
             onChange={(e) => setNotes(e.target.value)}
-            rows={7}
-            placeholder="Parsed text from your uploaded documents or camera scans will appear here, or paste your notes directly…"
+            rows={5}
+            placeholder="Type or paste study notes here, or upload an image above to extract directly…"
             className="w-full resize-y rounded-2xl border border-border bg-secondary/40 p-4 text-sm outline-none transition focus:border-primary focus:ring-2 focus:ring-ring/40"
           />
         </div>
@@ -289,7 +353,7 @@ export function Summarizer() {
             ) : (
               <Sparkles className="size-4" />
             )}
-            {parsing ? "Extracting Text…" : loading ? "Generating AI Summary…" : "Generate Summary"}
+            {parsing ? "Preparing Files…" : loading ? "Extracting & Organizing…" : "Organize Notes"}
           </button>
 
           {summary && (
@@ -297,7 +361,7 @@ export function Summarizer() {
               onClick={copySummary}
               className="inline-flex items-center gap-2 rounded-full border border-border bg-secondary/50 px-5 py-2.5 text-sm font-medium transition hover:bg-secondary"
             >
-              <Copy className="size-4" /> Copy Summary
+              <Copy className="size-4" /> Copy Output
             </button>
           )}
         </div>
@@ -308,10 +372,10 @@ export function Summarizer() {
         <div className="glass flex flex-col items-center justify-center rounded-3xl p-14 text-center">
           <Loader2 className="size-8 animate-spin text-primary-glow" />
           <p className="mt-4 font-medium text-foreground">
-            {parsing ? parseStatus : "Analyzing notes with Gemini AI and structuring study cards…"}
+            {parsing ? parseStatus : "Reading image with Gemini Vision and organizing actual points…"}
           </p>
           <p className="mt-1 text-xs text-muted-foreground">
-            Extracting key concepts, step-by-step breakdown, formulas, and revision points…
+            Extracting only visible content — strictly no hallucinations or assumptions.
           </p>
         </div>
       )}
@@ -322,116 +386,126 @@ export function Summarizer() {
           <div className="flex size-16 items-center justify-center rounded-3xl bg-secondary/80 text-primary-glow">
             <BookOpen className="size-8" />
           </div>
-          <h3 className="mt-4 text-xl font-bold">No Summary Generated Yet</h3>
+          <h3 className="mt-4 text-xl font-bold">No Notes Organized Yet</h3>
           <p className="mt-2 max-w-md text-sm text-muted-foreground">
-            Upload lecture PDFs, snap photos of board notes, or paste text above to generate structured study cards.
+            Upload handwritten notebook photos, lecture PDFs, or paste notes to generate clean, factual points.
           </p>
           <div className="mt-6 flex flex-wrap justify-center gap-3">
             <button
               onClick={() => fileInputRef.current?.click()}
               className="inline-flex items-center gap-2 rounded-full border border-primary/40 bg-primary/15 px-5 py-2 text-sm font-semibold text-primary-glow transition hover:bg-primary/25"
             >
-              <UploadCloud className="size-4" /> Upload Files
+              <UploadCloud className="size-4" /> Upload Notes / Photos
             </button>
             <button
               onClick={() => cameraInputRef.current?.click()}
               className="inline-flex items-center gap-2 rounded-full border border-border bg-secondary/50 px-5 py-2 text-sm font-medium transition hover:bg-secondary"
             >
-              <Camera className="size-4" /> Use Camera
+              <Camera className="size-4" /> Snap Photo
             </button>
           </div>
         </div>
       )}
 
-      {/* ── Summary Output ── */}
+      {/* ── Output Structure (Strict 3 Sections) ── */}
       {summary && !loading && !parsing && (
         <div className="space-y-5">
-          {/* 📌 Quick Overview */}
-          <div className="glass rounded-3xl p-6">
-            <div className="flex items-center gap-2 text-primary-glow">
-              <AlignLeft className="size-5" />
-              <h3 className="font-semibold">📌 Quick Overview</h3>
-            </div>
-            <p className="mt-3 text-sm leading-relaxed text-muted-foreground whitespace-pre-line">
-              {summary.overview}
-            </p>
-          </div>
-
-          <div className="grid gap-5 lg:grid-cols-2">
-            {/* 🔑 Key Concepts & Takeaways */}
-            <div className="glass rounded-3xl p-6">
-              <div className="flex items-center gap-2 text-primary-glow">
-                <ClipboardList className="size-5" />
-                <h3 className="font-semibold">🔑 Key Concepts & Takeaways</h3>
+          {summary.unreadableMessage ? (
+            <div className="glass rounded-3xl border border-amber-500/40 bg-amber-500/10 p-6">
+              <div className="flex items-center gap-2 text-amber-400">
+                <AlertTriangle className="size-5" />
+                <h3 className="font-semibold">Unreadable Image</h3>
               </div>
-              {summary.takeaways.length > 0 ? (
-                <ol className="mt-4 space-y-2.5 text-sm text-muted-foreground">
-                  {summary.takeaways.map((t, i) => (
-                    <li key={i} className="flex gap-3">
-                      <span className="flex size-5 shrink-0 items-center justify-center rounded-full bg-primary/20 text-[10px] font-bold text-primary-glow">
-                        {i + 1}
+              <p className="mt-2 text-sm text-foreground">
+                {summary.unreadableMessage}
+              </p>
+              <p className="mt-1 text-xs text-muted-foreground">
+                Please upload a higher resolution or better-lit photo of your handwritten or printed notes.
+              </p>
+            </div>
+          ) : (
+            <>
+              {/* ## Key Concepts / Topics */}
+              <div className="glass rounded-3xl p-6">
+                <div className="flex items-center gap-2 text-primary-glow">
+                  <BookOpen className="size-5" />
+                  <h3 className="font-semibold">Key Concepts / Topics</h3>
+                </div>
+                {summary.keyConcepts.length > 0 ? (
+                  <ul className="mt-4 space-y-2">
+                    {summary.keyConcepts.map((concept, i) => (
+                      <li key={i} className="flex items-start gap-2.5 text-sm text-foreground">
+                        <span className="mt-1.5 size-1.5 shrink-0 rounded-full bg-primary-glow" />
+                        <span className="font-medium">{concept}</span>
+                      </li>
+                    ))}
+                  </ul>
+                ) : (
+                  <p className="mt-3 text-xs text-muted-foreground">
+                    No specific topic headings found in notes.
+                  </p>
+                )}
+              </div>
+
+              {/* ## Important Points */}
+              <div className="glass rounded-3xl p-6">
+                <div className="flex items-center gap-2 text-primary-glow">
+                  <CheckCircle2 className="size-5" />
+                  <h3 className="font-semibold">Important Points</h3>
+                </div>
+                {summary.importantPoints.length > 0 ? (
+                  <ul className="mt-4 space-y-3">
+                    {summary.importantPoints.map((point, i) => (
+                      <li key={i} className="flex items-start gap-3 rounded-xl border border-border bg-secondary/30 p-3.5 text-sm leading-relaxed text-foreground">
+                        <span className="flex size-5 shrink-0 items-center justify-center rounded-full bg-primary/20 text-[10px] font-bold text-primary-glow">
+                          {i + 1}
+                        </span>
+                        <span>{point}</span>
+                      </li>
+                    ))}
+                  </ul>
+                ) : (
+                  <p className="mt-3 text-xs text-muted-foreground">
+                    No bullet points extracted.
+                  </p>
+                )}
+              </div>
+
+              {/* ## Keywords / Terms */}
+              <div className="glass rounded-3xl p-6">
+                <div className="flex items-center gap-2 text-primary-glow">
+                  <Tag className="size-5" />
+                  <h3 className="font-semibold">Keywords / Terms</h3>
+                </div>
+                {summary.keywords.length > 0 ? (
+                  <div className="mt-4 flex flex-wrap gap-2">
+                    {summary.keywords.map((term, i) => (
+                      <span
+                        key={i}
+                        className="rounded-full border border-primary/30 bg-primary/10 px-3.5 py-1 text-xs font-medium text-primary-glow"
+                      >
+                        {term}
                       </span>
-                      <span className="leading-relaxed">{t}</span>
-                    </li>
-                  ))}
-                </ol>
-              ) : (
-                <p className="mt-3 text-xs text-muted-foreground">No key concepts extracted.</p>
-              )}
-            </div>
-
-            {/* 💡 Important Definitions / Formulas */}
-            <div className="glass rounded-3xl p-6">
-              <div className="flex items-center gap-2 text-primary-glow">
-                <Lightbulb className="size-5" />
-                <h3 className="font-semibold">💡 Important Definitions / Formulas</h3>
+                    ))}
+                  </div>
+                ) : (
+                  <p className="mt-3 text-xs text-muted-foreground">
+                    No distinct keywords identified in notes.
+                  </p>
+                )}
               </div>
-              {summary.formulas.length > 0 ? (
-                <ul className="mt-4 space-y-2.5">
-                  {summary.formulas.map((f, i) => (
-                    <li key={i} className="rounded-xl border border-border bg-secondary/40 p-3">
-                      <p className="text-[11px] font-semibold uppercase tracking-wider text-primary-glow">
-                        {f.name}
-                      </p>
-                      <p className="mt-1 font-mono text-sm text-foreground">{f.body}</p>
-                    </li>
-                  ))}
-                </ul>
-              ) : (
-                <p className="mt-3 text-xs text-muted-foreground">No explicit definitions or formulas detected.</p>
-              )}
-            </div>
-          </div>
 
-          {/* 🧠 Revision Notes */}
-          <div className="glass rounded-3xl p-6">
-            <div className="flex items-center gap-2 text-primary-glow">
-              <Brain className="size-5" />
-              <h3 className="font-semibold">🧠 Revision Notes</h3>
-            </div>
-            {summary.examPoints.length > 0 ? (
-              <ul className="mt-4 grid gap-2.5 sm:grid-cols-2">
-                {summary.examPoints.map((p, i) => (
-                  <li key={i} className="flex gap-2 text-sm text-muted-foreground">
-                    <span className="mt-1.5 size-1.5 shrink-0 rounded-full bg-primary-glow" />
-                    <span className="leading-relaxed">{p}</span>
-                  </li>
-                ))}
-              </ul>
-            ) : (
-              <p className="mt-3 text-xs text-muted-foreground">No revision points extracted.</p>
-            )}
-          </div>
-
-          {/* Export button */}
-          <div className="flex justify-center">
-            <button
-              onClick={() => toast.info("PDF Export", { description: "Summary ready for download/print." })}
-              className="inline-flex items-center gap-2 rounded-full border border-primary/40 bg-primary/15 px-6 py-3 text-sm font-semibold text-primary-glow transition hover:bg-primary/25"
-            >
-              <FileDown className="size-4" /> Export Summary as PDF
-            </button>
-          </div>
+              {/* Action: Copy */}
+              <div className="flex justify-center">
+                <button
+                  onClick={copySummary}
+                  className="inline-flex items-center gap-2 rounded-full border border-primary/40 bg-primary/15 px-6 py-3 text-sm font-semibold text-primary-glow transition hover:bg-primary/25"
+                >
+                  <Copy className="size-4" /> Copy Organized Notes
+                </button>
+              </div>
+            </>
+          )}
         </div>
       )}
     </div>

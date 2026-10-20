@@ -1,7 +1,6 @@
 import * as pdfjsLib from "pdfjs-dist";
 import pdfjsWorker from "pdfjs-dist/build/pdf.worker.mjs?url";
 import mammoth from "mammoth";
-import { createWorker } from "tesseract.js";
 
 // Configure PDF.js worker reliably
 if (typeof window !== "undefined") {
@@ -18,38 +17,49 @@ if (typeof window !== "undefined") {
 
 export type ParseProgressCallback = (status: string) => void;
 
-/**
- * Renders a PDF page onto an HTML Canvas and runs Tesseract OCR.
- * Used as a fallback for scanned image-based PDF pages.
- */
-async function ocrPdfPage(page: any, pageNum?: number): Promise<string> {
-  try {
-    const viewport = page.getViewport({ scale: 1.5 });
-    const canvas = document.createElement("canvas");
-    const context = canvas.getContext("2d");
-    if (!context) return "";
-
-    canvas.height = viewport.height;
-    canvas.width = viewport.width;
-
-    await page.render({ canvasContext: context, viewport }).promise;
-
-    const worker = await createWorker("eng");
-    const ret = await worker.recognize(canvas);
-    await worker.terminate();
-    const text = (ret.data.text || "").trim();
-    if (text) {
-      console.log(`[CampusSync OCR] Extracted text from scanned PDF page ${pageNum ?? ""}:\n`, text);
-    }
-    return text;
-  } catch (err) {
-    console.warn("OCR on PDF page failed:", err);
-    return "";
-  }
+export interface ExtractedImageItem {
+  mimeType: string;
+  data: string; // base64 string
+  name: string;
 }
 
 /**
- * Extracts plain text content from uploaded PDF, DOCX, TXT, or Image files.
+ * Checks whether a given file is a supported image format.
+ */
+export function isImageFile(file: File): boolean {
+  const fileType = file.type || "";
+  const fileName = file.name.toLowerCase();
+  return (
+    fileType.startsWith("image/") ||
+    /\.(png|jpe?g|webp|bmp|gif)$/i.test(fileName)
+  );
+}
+
+/**
+ * Converts an image file to Base64 (stripping data URL prefix)
+ * so it can be sent directly to Gemini's native multimodal Vision API.
+ */
+export function fileToBase64(file: File): Promise<ExtractedImageItem> {
+  return new Promise((resolve, reject) => {
+    const reader = new FileReader();
+    reader.onload = () => {
+      const result = reader.result as string;
+      const commaIdx = result.indexOf(",");
+      const base64Data = commaIdx >= 0 ? result.slice(commaIdx + 1) : result;
+      resolve({
+        mimeType: file.type || "image/jpeg",
+        data: base64Data,
+        name: file.name,
+      });
+    };
+    reader.onerror = (err) => reject(err);
+    reader.readAsDataURL(file);
+  });
+}
+
+/**
+ * Extracts plain text content from uploaded PDF, DOCX, or TXT documents.
+ * Images are handled natively via direct Gemini Vision API, avoiding dead OCR errors.
  */
 export async function extractTextFromFile(
   file: File,
@@ -80,7 +90,6 @@ export async function extractTextFromFile(
 
       const pdfDoc = await loadingTask.promise;
       let fullText = "";
-      let scannedPagesCount = 0;
 
       for (let i = 1; i <= pdfDoc.numPages; i++) {
         onProgress?.(`Extracting PDF page ${i} of ${pdfDoc.numPages} (${file.name})…`);
@@ -91,26 +100,17 @@ export async function extractTextFromFile(
           .filter(Boolean);
 
         const pageText = pageStrings.join(" ").trim();
-
-        if (pageText.length > 10) {
+        if (pageText.length > 0) {
           fullText += pageText + "\n\n";
-        } else {
-          // Page has no direct text layer; attempt Canvas OCR for scanned PDF page
-          scannedPagesCount++;
-          onProgress?.(`Running OCR on scanned PDF page ${i} of ${pdfDoc.numPages}…`);
-          const ocrText = await ocrPdfPage(page, i);
-          if (ocrText.length > 0) {
-            fullText += ocrText + "\n\n";
-          }
         }
       }
 
       if (fullText.trim().length > 0) {
-        console.log(`[CampusSync Parser] Parsed PDF "${file.name}" (${pdfDoc.numPages} pages, ${fullText.trim().length} chars, scannedPages=${scannedPagesCount}).`);
+        console.log(`[CampusSync Parser] Parsed PDF "${file.name}" (${pdfDoc.numPages} pages, ${fullText.trim().length} chars).`);
         return fullText.trim();
       }
 
-      throw new Error("No readable text could be found or extracted from the PDF file.");
+      throw new Error("No readable text found in PDF. If this is a scanned document, upload the image directly.");
     } catch (err: any) {
       console.error("PDF text extraction error:", err);
       throw new Error(err.message || "Failed to parse PDF document text.");
@@ -140,47 +140,29 @@ export async function extractTextFromFile(
     }
   }
 
-  // 4. Image files (PNG, JPG, JPEG, WEBP)
-  if (
-    fileType.startsWith("image/") ||
-    /\.(png|jpe?g|webp|bmp|gif)$/i.test(fileName)
-  ) {
-    onProgress?.(`Initializing OCR engine for ${file.name}…`);
-    try {
-      const worker = await createWorker("eng");
-      onProgress?.(`Extracting text from ${file.name} with OCR…`);
-      const ret = await worker.recognize(file);
-      await worker.terminate();
-
-      const text = (ret.data.text || "").trim();
-      console.log(`[CampusSync OCR] Extracted text from "${file.name}":\n`, text);
-
-      if (text.length > 0) {
-        return text;
-      }
-      throw new Error(`No text detected in "${file.name}". Please ensure image is clear and legible.`);
-    } catch (err: any) {
-      console.error(`[CampusSync OCR] Failed on "${file.name}":`, err);
-      throw new Error(err.message || `Unable to perform OCR on ${file.name}.`);
-    }
+  // 4. Image files are processed directly via Gemini Vision
+  if (isImageFile(file)) {
+    return "";
   }
 
   throw new Error(`Unsupported file format: ${file.name}`);
 }
 
 /**
- * Processes multiple files sequentially and concatenates extracted text.
- * Reports per-file progress via onProgress.
+ * Processes multiple document files sequentially and concatenates extracted text.
+ * Images are skipped here because they are sent directly to Gemini multimodal vision.
  */
 export async function extractTextFromFiles(
   files: File[],
   onProgress?: ParseProgressCallback
 ): Promise<string> {
   const parts: string[] = [];
+  const nonImageFiles = files.filter((f) => !isImageFile(f));
 
-  for (let i = 0; i < files.length; i++) {
-    const file = files[i];
-    onProgress?.(`Processing file ${i + 1} of ${files.length}: ${file.name}…`);
+  let index = 0;
+  for (const file of nonImageFiles) {
+    index++;
+    onProgress?.(`Processing document ${index} of ${nonImageFiles.length}: ${file.name}…`);
     try {
       const text = await extractTextFromFile(file, onProgress);
       if (text.trim().length > 0) {
@@ -192,13 +174,5 @@ export async function extractTextFromFiles(
     }
   }
 
-  if (parts.length === 0) {
-    throw new Error("No readable text could be extracted from any of the uploaded files.");
-  }
-
-  const combined = parts.join("\n\n");
-  console.log(
-    `[CampusSync OCR] Completed extraction of ${parts.length} file(s). Total extracted length: ${combined.length} characters.`
-  );
-  return combined;
+  return parts.join("\n\n");
 }
