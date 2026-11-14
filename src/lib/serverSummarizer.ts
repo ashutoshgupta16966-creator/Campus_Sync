@@ -232,7 +232,7 @@ interface SingleAttemptResult {
 }
 
 async function callGeminiSingleAttempt(
-  content: { text?: string; images?: ImageData[]; language?: string },
+  content: { text?: string | undefined; images?: ImageData[] | undefined; language?: string | undefined },
   apiKey: string,
   modelName: string,
   timeoutMs = 20000
@@ -349,7 +349,7 @@ async function callGeminiSingleAttempt(
  * Per model: 20s timeout, retry once on 429/503, inspect 404 suggested model.
  */
 async function callGeminiWithFallbackChain(
-  content: { text?: string; images?: ImageData[]; language?: string },
+  content: { text?: string | undefined; images?: ImageData[] | undefined; language?: string | undefined },
   apiKey: string
 ): Promise<{ text: string | null; allFailed: boolean }> {
   const models = getModelList();

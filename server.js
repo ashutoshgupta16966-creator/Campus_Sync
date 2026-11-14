@@ -1,6 +1,5 @@
 import express from 'express';
 import cors from 'cors';
-import { createRequire } from 'module';
 import { fileURLToPath } from 'url';
 import { dirname, join, resolve } from 'path';
 import { existsSync, readdirSync, readFileSync } from 'fs';
