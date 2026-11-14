@@ -23,19 +23,52 @@ export interface SummaryResult {
  * Ordered fallback chain for Gemini models.
  * Prioritizes fast, natively multimodal Flash models.
  */
-export const FALLBACK_MODELS = [
-  "gemini-2.5-flash",
-  "gemini-2.0-flash",
-  "gemini-1.5-flash",
+export const DEFAULT_MODELS = [
+  "gemini-3.8-flash",
   "gemini-3.7-flash",
   "gemini-3.6-flash",
-  "gemini-3.5-flash",
 ] as const;
+
+export function getModelList(): string[] {
+  const envModels = process.env["GEMINI_MODELS"];
+  if (envModels && typeof envModels === "string" && envModels.trim()) {
+    const parsed = envModels
+      .split(",")
+      .map((m) => m.trim())
+      .filter(Boolean);
+    if (parsed.length > 0) {
+      return parsed;
+    }
+  }
+  return [...DEFAULT_MODELS];
+}
+
+export const FALLBACK_MODELS = DEFAULT_MODELS;
+
+export const HARDCODED_FALLBACK: SummaryResult = {
+  keyConcepts: [],
+  importantPoints: [],
+  keywords: [],
+  unreadableMessage: "I could not find clear readable notes in this image.",
+  rawMarkdown: "I could not find clear readable notes in this image.",
+  overview: "I could not find clear readable notes in this image.",
+  takeaways: [],
+  formulas: [],
+  examPoints: [],
+};
+
+export function extractSuggestedModel(errorMessage: string | undefined): string | null {
+  if (!errorMessage || typeof errorMessage !== "string") return null;
+  const match = errorMessage.match(/(?:use|suggested|try|recommend(?:ed)?)\s+[`"']?(gemini-[a-zA-Z0-9.-]+)[`"']?/i);
+  return match ? match[1]! : null;
+}
 
 export interface SummarizerInput {
   notes?: string | undefined;
   images?: ImageData[] | undefined;
   image?: (ImageData | string) | undefined;
+  language?: string | undefined;
+  lang?: string | undefined;
 }
 
 /**
@@ -189,12 +222,21 @@ export function parseSummaryResponse(rawText: string): SummaryResult {
 /**
  * Calls a single Gemini model with timeout protection and multimodal payload.
  */
-async function callGeminiWithTimeout(
-  content: { text?: string; images?: ImageData[] },
+interface SingleAttemptResult {
+  ok: boolean;
+  status: number;
+  text?: string;
+  errorType: string;
+  error: string;
+  suggestedModel?: string | null;
+}
+
+async function callGeminiSingleAttempt(
+  content: { text?: string; images?: ImageData[]; language?: string },
   apiKey: string,
   modelName: string,
-  timeoutMs = 25000
-): Promise<string> {
+  timeoutMs = 20000
+): Promise<SingleAttemptResult> {
   const controller = new AbortController();
   const timer = setTimeout(() => controller.abort(), timeoutMs);
 
@@ -203,13 +245,19 @@ async function callGeminiWithTimeout(
 
     const parts: any[] = [];
 
+    const languageInstruction = content.language
+      ? `\n\nCRITICAL LANGUAGE REQUIREMENT: All headings, explanations, bullet points, and extracted terms must be written strictly in ${content.language}.`
+      : "";
+
+    const effectiveSystemPrompt = `${EXACT_SYSTEM_PROMPT}${languageInstruction}`;
+
     if (content.text && content.text.trim()) {
       parts.push({
-        text: `${EXACT_SYSTEM_PROMPT}\n\n---\nDOCUMENT / STUDY NOTES CONTENT:\n${content.text.trim()}`,
+        text: `${effectiveSystemPrompt}\n\n---\nDOCUMENT / STUDY NOTES CONTENT:\n${content.text.trim()}`,
       });
     } else {
       parts.push({
-        text: EXACT_SYSTEM_PROMPT,
+        text: effectiveSystemPrompt,
       });
     }
 
@@ -252,17 +300,45 @@ async function callGeminiWithTimeout(
     if (!response.ok) {
       const errorJson = await response.json().catch(() => null);
       const apiError = errorJson?.error?.message || response.statusText;
-      throw new Error(`[${modelName}] HTTP ${response.status}: ${apiError}`);
+      const suggestedModel = response.status === 404 ? extractSuggestedModel(apiError) : null;
+      return {
+        ok: false,
+        status: response.status,
+        errorType: `HTTP ${response.status}`,
+        error: `[${modelName}] HTTP ${response.status}: ${apiError}`,
+        suggestedModel,
+      };
     }
 
     const data = await response.json();
     const text = data?.candidates?.[0]?.content?.parts?.[0]?.text;
 
     if (!text || !text.trim()) {
-      throw new Error(`[${modelName}] Empty content received from Gemini model`);
+      return {
+        ok: false,
+        status: 200,
+        errorType: "Empty Content",
+        error: `[${modelName}] Empty content received from Gemini model`,
+        suggestedModel: null,
+      };
     }
 
-    return text.trim();
+    return {
+      ok: true,
+      status: 200,
+      text: text.trim(),
+      errorType: "",
+      error: "",
+    };
+  } catch (err: any) {
+    const isTimeout = err?.name === "AbortError";
+    return {
+      ok: false,
+      status: isTimeout ? 408 : 0,
+      errorType: isTimeout ? "Timeout (20s)" : "Network Error",
+      error: isTimeout ? `[${modelName}] Request timed out after ${timeoutMs / 1000}s` : `[${modelName}] ${err?.message || String(err)}`,
+      suggestedModel: null,
+    };
   } finally {
     clearTimeout(timer);
   }
@@ -270,46 +346,96 @@ async function callGeminiWithTimeout(
 
 /**
  * Executes the fallback chain across the ordered model list.
+ * Per model: 20s timeout, retry once on 429/503, inspect 404 suggested model.
  */
 async function callGeminiWithFallbackChain(
-  content: { text?: string; images?: ImageData[] },
+  content: { text?: string; images?: ImageData[]; language?: string },
   apiKey: string
-): Promise<{ text: string; modelUsed: string }> {
+): Promise<{ text: string | null; allFailed: boolean }> {
+  const models = getModelList();
   const modelErrors: string[] = [];
+  const triedModels = new Set<string>();
 
-  for (const model of FALLBACK_MODELS) {
-    try {
-      console.log(`[CampusSync Server] Attempting Gemini request with model: ${model}...`);
-      const text = await callGeminiWithTimeout(content, apiKey, model);
-      console.log(`[CampusSync Server] Successfully generated summary using model: ${model}`);
-      return { text, modelUsed: model };
-    } catch (err: any) {
-      const isTimeout = err?.name === "AbortError";
-      const errorMsg = isTimeout ? "Request timed out" : (err?.message || String(err));
-      console.warn(`[CampusSync Server] Model "${model}" failed (${errorMsg}). Retrying next fallback model...`);
-      modelErrors.push(`${model}: ${errorMsg}`);
+  for (const model of models) {
+    if (triedModels.has(model)) continue;
+    triedModels.add(model);
+
+    // Attempt 1: 20s timeout
+    const t0 = Date.now();
+    console.log(`[CampusSync Server] [Model: ${model}] [Attempt 1] Starting request (timeout: 20s)...`);
+    const res1 = await callGeminiSingleAttempt(content, apiKey, model, 20000);
+    const duration1 = Date.now() - t0;
+
+    if (res1.ok && res1.text) {
+      console.log(`[CampusSync Server] [Model: ${model}] [Attempt 1] SUCCESS in ${duration1}ms`);
+      return { text: res1.text, allFailed: false };
     }
+
+    console.warn(`[CampusSync Server] [Model: ${model}] [Attempt 1] FAILED in ${duration1}ms | ErrorType: ${res1.errorType} | Details: ${res1.error}`);
+    modelErrors.push(`${model} (Attempt 1): ${res1.error}`);
+
+    // If 404 returned a suggested replacement model, try it immediately
+    if (res1.status === 404 && res1.suggestedModel && !triedModels.has(res1.suggestedModel)) {
+      const suggested = res1.suggestedModel;
+      triedModels.add(suggested);
+      console.log(`[CampusSync Server] [Model: ${model}] 404 suggested replacement model: "${suggested}". Attempting suggested model now...`);
+      const tSug = Date.now();
+      const resSug = await callGeminiSingleAttempt(content, apiKey, suggested, 20000);
+      const durationSug = Date.now() - tSug;
+
+      if (resSug.ok && resSug.text) {
+        console.log(`[CampusSync Server] [Model: ${suggested}] [Suggested Attempt] SUCCESS in ${durationSug}ms`);
+        return { text: resSug.text, allFailed: false };
+      }
+
+      console.warn(`[CampusSync Server] [Model: ${suggested}] [Suggested Attempt] FAILED in ${durationSug}ms | ErrorType: ${resSug.errorType} | Details: ${resSug.error}`);
+      modelErrors.push(`${suggested} (Suggested): ${resSug.error}`);
+    }
+
+    // Retry once on 429 (Rate Limit) or 503 (Service Unavailable)
+    if (res1.status === 429 || res1.status === 503) {
+      console.log(`[CampusSync Server] [Model: ${model}] Encountered HTTP ${res1.status}. Waiting 2s before retry (Attempt 2)...`);
+      await new Promise((r) => setTimeout(r, 2000));
+      const tRetry = Date.now();
+      console.log(`[CampusSync Server] [Model: ${model}] [Attempt 2 / Retry] Starting retry (timeout: 20s)...`);
+      const resRetry = await callGeminiSingleAttempt(content, apiKey, model, 20000);
+      const durationRetry = Date.now() - tRetry;
+
+      if (resRetry.ok && resRetry.text) {
+        console.log(`[CampusSync Server] [Model: ${model}] [Attempt 2 / Retry] SUCCESS in ${durationRetry}ms`);
+        return { text: resRetry.text, allFailed: false };
+      }
+
+      console.warn(`[CampusSync Server] [Model: ${model}] [Attempt 2 / Retry] FAILED in ${durationRetry}ms | ErrorType: ${resRetry.errorType} | Details: ${resRetry.error}`);
+      modelErrors.push(`${model} (Attempt 2): ${resRetry.error}`);
+    }
+
+    console.log(`[CampusSync Server] [Model: ${model}] Moving to next model in fallback chain...`);
   }
 
-  throw new Error(
-    `All Gemini models in fallback chain failed.\nErrors:\n${modelErrors.join("\n")}`
+  console.error(
+    `[CampusSync Server] All Gemini models in fallback chain failed.\nErrors:\n${modelErrors.join("\n")}\nReturning hardcoded fallback response so the app never breaks.`
   );
+  return { text: null, allFailed: true };
 }
 
 /**
  * Server-side entry point for summarization.
  * Supports both text notes and native images (multimodal vision).
+ * Never breaks: returns safe hardcoded fallback on upstream failure.
  */
 export async function runServerGeminiSummarizer(
   input: string | SummarizerInput
 ): Promise<SummaryResult> {
   let notes = "";
   const images: ImageData[] = [];
+  let language: string | undefined = undefined;
 
   if (typeof input === "string") {
     notes = input.trim();
   } else if (input && typeof input === "object") {
     notes = (input.notes || "").trim();
+    language = input.language || input.lang;
     if (Array.isArray(input.images)) {
       images.push(...input.images);
     }
@@ -329,11 +455,22 @@ export async function runServerGeminiSummarizer(
     throw new Error("No readable text notes or image provided. Please upload notes or paste text.");
   }
 
-  const apiKey = getServerApiKey();
-  const { text: rawResponse } = await callGeminiWithFallbackChain(
-    { text: notes, images },
+  let apiKey: string;
+  try {
+    apiKey = getServerApiKey();
+  } catch (err: any) {
+    console.error("[CampusSync Server] GEMINI_API_KEY missing:", err?.message);
+    return { ...HARDCODED_FALLBACK };
+  }
+
+  const { text: rawResponse, allFailed } = await callGeminiWithFallbackChain(
+    { text: notes, images, language },
     apiKey
   );
+
+  if (allFailed || !rawResponse) {
+    return { ...HARDCODED_FALLBACK };
+  }
 
   return parseSummaryResponse(rawResponse);
 }

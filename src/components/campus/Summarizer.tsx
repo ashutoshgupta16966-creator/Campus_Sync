@@ -151,6 +151,7 @@ export function Summarizer() {
 
     // 3. Call server-side Gemini AI with strict extraction prompt
     setLoading(true);
+    setParsing(true);
     setParseStatus(
       imagesToProcess.length > 0
         ? "Analyzing handwritten/printed notes image with Gemini Vision…"
@@ -181,6 +182,7 @@ export function Summarizer() {
       });
     } finally {
       setLoading(false);
+      setParsing(false);
     }
   };
 

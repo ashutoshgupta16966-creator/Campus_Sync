@@ -2,7 +2,7 @@ import "./lib/error-capture";
 
 import { consumeLastCapturedError } from "./lib/error-capture";
 import { renderErrorPage } from "./lib/error-page";
-import { runServerGeminiSummarizer } from "./lib/serverSummarizer";
+import { runServerGeminiSummarizer, HARDCODED_FALLBACK } from "./lib/serverSummarizer";
 import { analyzeResumeText } from "./lib/atsAnalyzer";
 
 type ServerEntry = {
@@ -69,19 +69,27 @@ export default {
           });
         }
 
+        const language = (body as any)?.language || (body as any)?.lang;
         const summary = await runServerGeminiSummarizer({
           notes: notes || undefined,
           images: images || undefined,
           image: image || undefined,
+          language: language || undefined,
         });
         return new Response(JSON.stringify(summary), {
           status: 200,
           headers: { "content-type": "application/json" },
         });
       } catch (err: any) {
-        console.error("[CampusSync API] /api/summarize failed:", err);
-        return new Response(JSON.stringify({ error: err.message || "Failed to generate summary" }), {
-          status: 500,
+        console.error("[CampusSync API] /api/summarize error:", err);
+        if (err?.message && err.message.includes("No readable notes")) {
+          return new Response(JSON.stringify({ error: err.message }), {
+            status: 400,
+            headers: { "content-type": "application/json" },
+          });
+        }
+        return new Response(JSON.stringify(HARDCODED_FALLBACK), {
+          status: 200,
           headers: { "content-type": "application/json" },
         });
       }

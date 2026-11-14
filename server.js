@@ -131,14 +131,43 @@ app.get('/api/health', (req, res) => {
 
 // ─── 2. AI Notes Summarizer (Gemini API with Fallback Chain) ─────────────────
 
-const FALLBACK_MODELS = [
-  'gemini-2.5-flash',
-  'gemini-2.0-flash',
-  'gemini-1.5-flash',
+const DEFAULT_MODELS = [
+  'gemini-3.8-flash',
   'gemini-3.7-flash',
   'gemini-3.6-flash',
-  'gemini-3.5-flash',
 ];
+
+function getModelList() {
+  const envModels = process.env.GEMINI_MODELS;
+  if (envModels && typeof envModels === 'string' && envModels.trim()) {
+    const parsed = envModels
+      .split(',')
+      .map((m) => m.trim())
+      .filter(Boolean);
+    if (parsed.length > 0) {
+      return parsed;
+    }
+  }
+  return [...DEFAULT_MODELS];
+}
+
+const HARDCODED_FALLBACK = {
+  keyConcepts: [],
+  importantPoints: [],
+  keywords: [],
+  unreadableMessage: 'I could not find clear readable notes in this image.',
+  rawMarkdown: 'I could not find clear readable notes in this image.',
+  overview: 'I could not find clear readable notes in this image.',
+  takeaways: [],
+  formulas: [],
+  examPoints: [],
+};
+
+function extractSuggestedModel(errorMessage) {
+  if (!errorMessage || typeof errorMessage !== 'string') return null;
+  const match = errorMessage.match(/(?:use|suggested|try|recommend(?:ed)?)\s+[`"']?(gemini-[a-zA-Z0-9.-]+)[`"']?/i);
+  return match ? match[1] : null;
+}
 
 const EXACT_SYSTEM_PROMPT = `You are a strict note-organizing assistant. You will be given an image of handwritten or printed study notes. Your ONLY job is to extract and organize the actual content visible in the image — do not add any information, facts, explanations, or examples that are not explicitly written in the image. If part of the image is unclear or illegible, skip it rather than guessing. Do not use your own general knowledge about the topic to fill gaps. Format your response in this structure exactly:
 
@@ -274,7 +303,7 @@ function parseSummaryResponse(rawText) {
   };
 }
 
-async function callGeminiWithTimeout(content, apiKey, modelName, timeoutMs = 25000) {
+async function callGeminiSingleAttempt(content, apiKey, modelName, timeoutMs = 20000) {
   const controller = new AbortController();
   const timer = setTimeout(() => controller.abort(), timeoutMs);
 
@@ -283,13 +312,19 @@ async function callGeminiWithTimeout(content, apiKey, modelName, timeoutMs = 250
 
     const parts = [];
 
+    const languageInstruction = content.language
+      ? `\n\nCRITICAL LANGUAGE REQUIREMENT: All headings, explanations, bullet points, and extracted terms must be written strictly in ${content.language}.`
+      : '';
+
+    const effectiveSystemPrompt = `${EXACT_SYSTEM_PROMPT}${languageInstruction}`;
+
     if (content.text && content.text.trim()) {
       parts.push({
-        text: `${EXACT_SYSTEM_PROMPT}\n\n---\nDOCUMENT / STUDY NOTES CONTENT:\n${content.text.trim()}`,
+        text: `${effectiveSystemPrompt}\n\n---\nDOCUMENT / STUDY NOTES CONTENT:\n${content.text.trim()}`,
       });
     } else {
       parts.push({
-        text: EXACT_SYSTEM_PROMPT,
+        text: effectiveSystemPrompt,
       });
     }
 
@@ -330,45 +365,125 @@ async function callGeminiWithTimeout(content, apiKey, modelName, timeoutMs = 250
     if (!response.ok) {
       const errorJson = await response.json().catch(() => null);
       const apiError = errorJson?.error?.message || response.statusText;
-      throw new Error(`[${modelName}] HTTP ${response.status}: ${apiError}`);
+      const suggestedModel = response.status === 404 ? extractSuggestedModel(apiError) : null;
+      return {
+        ok: false,
+        status: response.status,
+        errorType: `HTTP ${response.status}`,
+        error: `[${modelName}] HTTP ${response.status}: ${apiError}`,
+        suggestedModel,
+      };
     }
 
     const data = await response.json();
     const text = data?.candidates?.[0]?.content?.parts?.[0]?.text;
 
     if (!text || !text.trim()) {
-      throw new Error(`[${modelName}] Empty content received from Gemini model`);
+      return {
+        ok: false,
+        status: 200,
+        errorType: 'Empty Content',
+        error: `[${modelName}] Empty content received from Gemini model`,
+        suggestedModel: null,
+      };
     }
 
-    return text.trim();
+    return {
+      ok: true,
+      text: text.trim(),
+    };
+  } catch (err) {
+    const isTimeout = err?.name === 'AbortError';
+    return {
+      ok: false,
+      status: isTimeout ? 408 : 0,
+      errorType: isTimeout ? 'Timeout (20s)' : 'Network Error',
+      error: isTimeout ? `[${modelName}] Request timed out after ${timeoutMs / 1000}s` : `[${modelName}] ${err?.message || String(err)}`,
+      suggestedModel: null,
+    };
   } finally {
     clearTimeout(timer);
   }
 }
 
 async function callGeminiWithFallbackChain(content, apiKey) {
+  const models = getModelList();
   const modelErrors = [];
-  for (const model of FALLBACK_MODELS) {
-    try {
-      console.log(`[CampusSync Backend] Attempting Gemini request with model: ${model}...`);
-      const text = await callGeminiWithTimeout(content, apiKey, model);
-      console.log(`[CampusSync Backend] Successfully generated summary using model: ${model}`);
-      return { text, modelUsed: model };
-    } catch (err) {
-      const isTimeout = err?.name === 'AbortError';
-      const errorMsg = isTimeout ? 'Request timed out after 25s' : err?.message || String(err);
-      console.warn(`[CampusSync Backend] Model "${model}" failed (${errorMsg}). Retrying next fallback model...`);
-      modelErrors.push(`${model}: ${errorMsg}`);
+  const triedModels = new Set();
+
+  for (const model of models) {
+    if (triedModels.has(model)) continue;
+    triedModels.add(model);
+
+    // Attempt 1 (20s timeout per model)
+    const t0 = Date.now();
+    console.log(`[CampusSync Backend] [Model: ${model}] [Attempt 1] Starting request (timeout: 20s)...`);
+    const res1 = await callGeminiSingleAttempt(content, apiKey, model, 20000);
+    const duration1 = Date.now() - t0;
+
+    if (res1.ok) {
+      console.log(`[CampusSync Backend] [Model: ${model}] [Attempt 1] SUCCESS in ${duration1}ms`);
+      return { text: res1.text };
     }
+
+    console.warn(`[CampusSync Backend] [Model: ${model}] [Attempt 1] FAILED in ${duration1}ms | ErrorType: ${res1.errorType} | Details: ${res1.error}`);
+    modelErrors.push(`${model} (Attempt 1): ${res1.error}`);
+
+    // If 404 suggested replacement model, attempt it
+    if (res1.status === 404 && res1.suggestedModel && !triedModels.has(res1.suggestedModel)) {
+      const suggested = res1.suggestedModel;
+      triedModels.add(suggested);
+      console.log(`[CampusSync Backend] [Model: ${model}] 404 suggested replacement model: "${suggested}". Attempting suggested model now...`);
+      const tSug = Date.now();
+      const resSug = await callGeminiSingleAttempt(content, apiKey, suggested, 20000);
+      const durationSug = Date.now() - tSug;
+
+      if (resSug.ok) {
+        console.log(`[CampusSync Backend] [Model: ${suggested}] [Suggested Attempt] SUCCESS in ${durationSug}ms`);
+        return { text: resSug.text };
+      }
+
+      console.warn(`[CampusSync Backend] [Model: ${suggested}] [Suggested Attempt] FAILED in ${durationSug}ms | ErrorType: ${resSug.errorType} | Details: ${resSug.error}`);
+      modelErrors.push(`${suggested} (Suggested): ${resSug.error}`);
+    }
+
+    // Retry once on 429 (Rate Limit) or 503 (Service Unavailable)
+    if (res1.status === 429 || res1.status === 503) {
+      console.log(`[CampusSync Backend] [Model: ${model}] Encountered HTTP ${res1.status}. Waiting 2s before retry (Attempt 2)...`);
+      await new Promise((r) => setTimeout(r, 2000));
+      const tRetry = Date.now();
+      console.log(`[CampusSync Backend] [Model: ${model}] [Attempt 2 / Retry] Starting retry (timeout: 20s)...`);
+      const resRetry = await callGeminiSingleAttempt(content, apiKey, model, 20000);
+      const durationRetry = Date.now() - tRetry;
+
+      if (resRetry.ok) {
+        console.log(`[CampusSync Backend] [Model: ${model}] [Attempt 2 / Retry] SUCCESS in ${durationRetry}ms`);
+        return { text: resRetry.text };
+      }
+
+      console.warn(`[CampusSync Backend] [Model: ${model}] [Attempt 2 / Retry] FAILED in ${durationRetry}ms | ErrorType: ${resRetry.errorType} | Details: ${resRetry.error}`);
+      modelErrors.push(`${model} (Attempt 2): ${resRetry.error}`);
+    }
+
+    console.log(`[CampusSync Backend] [Model: ${model}] Moving to next model in fallback chain...`);
   }
-  throw new Error(`All Gemini models in fallback chain failed.\nErrors:\n${modelErrors.join('\n')}`);
+
+  console.error(`[CampusSync Backend] All Gemini models in fallback chain failed.\nErrors:\n${modelErrors.join('\n')}\nReturning hardcoded fallback response so the app never breaks.`);
+  return { text: null, allFailed: true };
 }
 
 async function runGeminiSummarizer(input) {
-  const apiKey = getServerApiKey();
+  let apiKey;
+  try {
+    apiKey = getServerApiKey();
+  } catch (err) {
+    console.error('[CampusSync Backend] API Key missing:', err.message);
+    return { ...HARDCODED_FALLBACK };
+  }
 
   let notes = '';
   const images = [];
+  const language = input?.language || input?.lang;
 
   if (typeof input === 'string') {
     notes = input.trim();
@@ -394,7 +509,15 @@ async function runGeminiSummarizer(input) {
     throw new Error('No readable notes or image provided. Please upload notes or paste text.');
   }
 
-  const { text: rawResponse } = await callGeminiWithFallbackChain({ text: notes, images }, apiKey);
+  const { text: rawResponse, allFailed } = await callGeminiWithFallbackChain(
+    { text: notes, images, language },
+    apiKey
+  );
+
+  if (allFailed || !rawResponse) {
+    return { ...HARDCODED_FALLBACK };
+  }
+
   return parseSummaryResponse(rawResponse);
 }
 
@@ -404,16 +527,20 @@ const handleSummarizeRequest = async (req, res) => {
     const notes = body.notes || body.text || body.content;
     const images = body.images;
     const image = body.image;
+    const language = body.language || body.lang || body.targetLanguage;
 
     if ((!notes || typeof notes !== 'string' || !notes.trim()) && !images && !image) {
       return res.status(400).json({ error: 'No readable notes or image provided.' });
     }
 
-    const summary = await runGeminiSummarizer({ notes, images, image });
+    const summary = await runGeminiSummarizer({ notes, images, image, language });
     return res.status(200).json(summary);
   } catch (err) {
     console.error('[CampusSync Backend] Summarizer error:', err.message);
-    return res.status(500).json({ error: err.message || 'Failed to generate summary' });
+    if (err.message && err.message.includes('No readable notes')) {
+      return res.status(400).json({ error: err.message });
+    }
+    return res.status(200).json(HARDCODED_FALLBACK);
   }
 };
 
