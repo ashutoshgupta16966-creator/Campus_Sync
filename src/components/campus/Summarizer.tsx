@@ -122,7 +122,7 @@ export function Summarizer() {
     // 2. Prepare images for native Gemini Multimodal Vision API (no dead OCR!)
     if (imageFiles.length > 0) {
       setParsing(true);
-      setParseStatus(`Preparing ${imageFiles.length} image scan${imageFiles.length > 1 ? "s" : ""} for Gemini Vision…`);
+      setParseStatus(`Preparing ${imageFiles.length} image scan${imageFiles.length > 1 ? "s" : ""} for Vision analysis…`);
       try {
         const converted = await Promise.all(imageFiles.map((file) => fileToBase64(file)));
         for (const item of converted) {
@@ -154,8 +154,8 @@ export function Summarizer() {
     setParsing(true);
     setParseStatus(
       imagesToProcess.length > 0
-        ? "Analyzing handwritten/printed notes image with Gemini Vision…"
-        : "Extracting points with Gemini AI…"
+        ? "Analyzing handwritten/printed notes image…"
+        : "Extracting points from notes…"
     );
 
     try {
@@ -178,7 +178,7 @@ export function Summarizer() {
     } catch (err: any) {
       console.error("[CampusSync Summarizer] Error:", err);
       toast.error("Organizing notes failed", {
-        description: err.message || "Failed to process notes with Gemini.",
+        description: err.message || "Failed to organize notes.",
       });
     } finally {
       setLoading(false);
@@ -374,7 +374,7 @@ export function Summarizer() {
         <div className="glass flex flex-col items-center justify-center rounded-3xl p-14 text-center">
           <Loader2 className="size-8 animate-spin text-primary-glow" />
           <p className="mt-4 font-medium text-foreground">
-            {parsing ? parseStatus : "Reading image with Gemini Vision and organizing actual points…"}
+            {parsing ? parseStatus : "Analyzing notes and organizing actual points…"}
           </p>
           <p className="mt-1 text-xs text-muted-foreground">
             Extracting only visible content — strictly no hallucinations or assumptions.

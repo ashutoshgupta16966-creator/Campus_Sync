@@ -1,5 +1,7 @@
 import express from 'express';
 import cors from 'cors';
+import Anthropic from '@anthropic-ai/sdk';
+import { GoogleGenerativeAI } from '@google/generative-ai';
 import { fileURLToPath } from 'url';
 import { dirname, join, resolve } from 'path';
 import { existsSync, readdirSync, readFileSync } from 'fs';
@@ -128,27 +130,16 @@ app.get('/api/health', (req, res) => {
   });
 });
 
-// ─── 2. AI Notes Summarizer (Gemini API with Fallback Chain) ─────────────────
+// ─── 2. AI Notes Summarizer (Claude + Gemini Multi-Model Fallback Chain with Continuation) ───
 
-const DEFAULT_MODELS = [
-  'gemini-3.8-flash',
-  'gemini-3.7-flash',
-  'gemini-3.6-flash',
+// Multi-tier model fallback chain in strict priority order
+const FALLBACK_CHAIN = [
+  { provider: 'anthropic', model: 'claude-opus-4.8' },
+  { provider: 'anthropic', model: 'claude-sonnet-4.6' },
+  { provider: 'gemini', model: 'gemini-3.8-flash' },
+  { provider: 'gemini', model: 'gemini-3.7-flash' },
+  { provider: 'gemini', model: 'gemini-3.6-flash' },
 ];
-
-function getModelList() {
-  const envModels = process.env.GEMINI_MODELS;
-  if (envModels && typeof envModels === 'string' && envModels.trim()) {
-    const parsed = envModels
-      .split(',')
-      .map((m) => m.trim())
-      .filter(Boolean);
-    if (parsed.length > 0) {
-      return parsed;
-    }
-  }
-  return [...DEFAULT_MODELS];
-}
 
 const HARDCODED_FALLBACK = {
   keyConcepts: [],
@@ -162,13 +153,13 @@ const HARDCODED_FALLBACK = {
   examPoints: [],
 };
 
-function extractSuggestedModel(errorMessage) {
-  if (!errorMessage || typeof errorMessage !== 'string') return null;
-  const match = errorMessage.match(/(?:use|suggested|try|recommend(?:ed)?)\s+[`"']?(gemini-[a-zA-Z0-9.-]+)[`"']?/i);
-  return match ? match[1] : null;
-}
-
-const EXACT_SYSTEM_PROMPT = `You are a strict note-organizing assistant. You will be given an image of handwritten or printed study notes. Your ONLY job is to extract and organize the actual content visible in the image — do not add any information, facts, explanations, or examples that are not explicitly written in the image. If part of the image is unclear or illegible, skip it rather than guessing. Do not use your own general knowledge about the topic to fill gaps. Format your response in this structure exactly:
+const EXACT_SYSTEM_PROMPT = `You are a strict note-organizing assistant. You will be given study notes (handwritten or printed images, or document text).
+Your ONLY job is to extract and organize the actual content visible in the notes:
+- Summarise only what is actually written in the notes.
+- Do not invent facts, formulas, explanations, or topics that are not in the notes.
+- If part of the image is unclear, blurry, or unreadable, say so briefly instead of guessing.
+- Keep the notes' original language, terminology, and structure (headings, bullet points).
+- Format your response in this structure exactly:
 
 ## Key Concepts / Topics
 (list the main topics/headings exactly as found in the notes)
@@ -179,26 +170,161 @@ const EXACT_SYSTEM_PROMPT = `You are a strict note-organizing assistant. You wil
 ## Keywords / Terms
 (list key terms or words that appear in the notes)
 
-If the image does not contain readable study notes, respond only with: 'I could not find clear readable notes in this image.'`;
+If the image or input does not contain readable study notes, respond only with: 'I could not find clear readable notes in this image.'`;
 
-function getServerApiKey() {
+function getAnthropicApiKey() {
+  const envKey = process.env.ANTHROPIC_API_KEY;
+  if (envKey && typeof envKey === 'string' && envKey.trim()) {
+    return envKey.trim();
+  }
+  return null;
+}
+
+function getGeminiApiKey() {
   const envKey = process.env.GEMINI_API_KEY;
   if (envKey && typeof envKey === 'string' && envKey.trim()) {
     return envKey.trim();
   }
-  try {
-    const envPath = resolve(__dirname, '.env');
-    if (existsSync(envPath)) {
-      const content = readFileSync(envPath, 'utf-8');
-      const match = content.match(/^\s*GEMINI_API_KEY\s*=\s*([^\r\n#]+)/m);
-      if (match && match[1].trim()) {
-        const key = match[1].trim().replace(/^['"]|['"]$/g, '');
-        process.env.GEMINI_API_KEY = key;
-        return key;
+  return null;
+}
+
+function extractSuggestedModel(errorMessage) {
+  if (!errorMessage || typeof errorMessage !== 'string') return null;
+  const match = errorMessage.match(/(?:use|suggested|try|recommend(?:ed)?)\s+[`"']?([a-zA-Z0-9.-]+)[`"']?/i);
+  return match ? match[1] : null;
+}
+
+function joinContinuationText(existingText, incomingText) {
+  if (!existingText) return (incomingText || '').trim();
+  if (!incomingText) return existingText.trim();
+
+  let trimmedIncoming = incomingText.trimStart();
+  const trimmedExisting = existingText.trimEnd();
+
+  const incomingHadLeadingNewline = /^[\r\n]/.test(incomingText);
+  const existingHadTrailingNewline = /[\r\n]$/.test(existingText);
+
+  // 1. Check if the next model repeated the last word (or last partial word)
+  const existingWords = trimmedExisting.split(/\s+/);
+  const lastWord = existingWords[existingWords.length - 1];
+
+  if (lastWord && lastWord.length >= 2) {
+    const escapedWord = lastWord.replace(/[-/\\^$*+?.()|[\]{}]/g, '\\$&');
+
+    // Case 1A: Exact whole-word repetition (e.g. "computer" followed by "computer science")
+    const wholeWordRegex = new RegExp(`^${escapedWord}\\b`, 'i');
+    if (wholeWordRegex.test(trimmedIncoming)) {
+      trimmedIncoming = trimmedIncoming.replace(wholeWordRegex, '').trimStart();
+      return `${trimmedExisting} ${trimmedIncoming}`;
+    }
+
+    // Case 1B: Prefix repetition (e.g. "compu" followed by "computer science")
+    const prefixRegex = new RegExp(`^${escapedWord}`, 'i');
+    if (prefixRegex.test(trimmedIncoming)) {
+      const suffixAndRest = trimmedIncoming.slice(lastWord.length);
+      return `${trimmedExisting}${suffixAndRest}`;
+    }
+  }
+
+  // 2. Check if boundary contains newlines or starts with a markdown header/bullet
+  const incomingIsMarkdownHeaderOrBullet = /^#{1,6}\s|^[-*•►▶→\d]/.test(trimmedIncoming);
+  if (incomingHadLeadingNewline || existingHadTrailingNewline || incomingIsMarkdownHeaderOrBullet) {
+    return `${trimmedExisting}\n\n${trimmedIncoming}`;
+  }
+
+  // 3. If incoming starts with punctuation (e.g. "." or ","), attach without space
+  if (/^[.,!?;:)]/.test(trimmedIncoming)) {
+    return `${trimmedExisting}${trimmedIncoming}`;
+  }
+
+  // 4. Default clean join: always ensure single space between consecutive words
+  return `${trimmedExisting} ${trimmedIncoming}`;
+}
+
+function normalizeAndValidateImages(images) {
+  if (!Array.isArray(images) || images.length === 0) return [];
+  const valid = [];
+  for (const img of images) {
+    if (!img || !img.data) continue;
+    let mimeType = (img.mimeType || 'image/jpeg').toLowerCase();
+    if (mimeType === 'image/jpg') mimeType = 'image/jpeg';
+    const cleanData = img.data.replace(/^data:[^;]+;base64,/, '').trim();
+    if (!cleanData) continue;
+    valid.push({
+      mimeType,
+      data: cleanData,
+    });
+  }
+  return valid;
+}
+
+function formatAnthropicContent(content, partialText) {
+  const userBlocks = [];
+
+  if (Array.isArray(content.images) && content.images.length > 0) {
+    for (const img of content.images) {
+      if (img.data) {
+        userBlocks.push({
+          type: 'image',
+          source: {
+            type: 'base64',
+            media_type: img.mimeType || 'image/jpeg',
+            data: img.data,
+          },
+        });
       }
     }
-  } catch {}
-  throw new Error('Server configuration error: GEMINI_API_KEY is not set in environment variables.');
+  }
+
+  let textPrompt = '';
+  if (content.text && content.text.trim()) {
+    textPrompt += `STUDY NOTES / DOCUMENT CONTENT:\n${content.text.trim()}\n\n`;
+  }
+
+  if (partialText && partialText.trim()) {
+    textPrompt += `Here is the summary written so far:\n"""\n${partialText.trim()}\n"""\n\nContinue exactly from where it stopped. Do not repeat anything already written. If the text stopped in the middle of a word or sentence, finish that sentence first before continuing. Do not repeat the beginning of the sentence. Do not restart, do not apologise, do not mention any error or model change. Keep the same format and style.`;
+  } else {
+    textPrompt += `Please extract and organize the study notes according to the system instructions.`;
+  }
+
+  userBlocks.push({
+    type: 'text',
+    text: textPrompt,
+  });
+
+  return userBlocks;
+}
+
+function formatGeminiContent(content, partialText) {
+  const parts = [];
+
+  let textPrompt = '';
+  if (content.text && content.text.trim()) {
+    textPrompt += `STUDY NOTES / DOCUMENT CONTENT:\n${content.text.trim()}\n\n`;
+  }
+
+  if (partialText && partialText.trim()) {
+    textPrompt += `Here is the summary written so far:\n"""\n${partialText.trim()}\n"""\n\nContinue exactly from where it stopped. Do not repeat anything already written. If the text stopped in the middle of a word or sentence, finish that sentence first before continuing. Do not repeat the beginning of the sentence. Do not restart, do not apologise, do not mention any error or model change. Keep the same format and style.`;
+  } else {
+    textPrompt += `Please extract and organize the study notes according to the system instructions.`;
+  }
+
+  parts.push({ text: textPrompt });
+
+  if (Array.isArray(content.images) && content.images.length > 0) {
+    for (const img of content.images) {
+      if (img.data) {
+        parts.push({
+          inlineData: {
+            mimeType: img.mimeType || 'image/jpeg',
+            data: img.data,
+          },
+        });
+      }
+    }
+  }
+
+  return parts;
 }
 
 function parseSummaryResponse(rawText) {
@@ -302,184 +428,286 @@ function parseSummaryResponse(rawText) {
   };
 }
 
-async function callGeminiSingleAttempt(content, apiKey, modelName, timeoutMs = 20000) {
+/**
+ * Streams a single model with a 35s hard timeout and 15s chunk-stall watchdog.
+ * Collects text chunks and invokes onChunk callback as chunks arrive.
+ */
+async function streamSingleModel({
+  provider,
+  modelName,
+  content,
+  partialText,
+  effectiveSystemPrompt,
+  anthropicApiKey,
+  geminiApiKey,
+  onChunk,
+}) {
+  const OVERALL_TIMEOUT_MS = 35000; // 35 seconds
+  const STALL_TIMEOUT_MS = 15000;   // 15 seconds
+
   const controller = new AbortController();
-  const timer = setTimeout(() => controller.abort(), timeoutMs);
+  let timedOut = false;
+  let stalled = false;
+
+  const overallTimer = setTimeout(() => {
+    timedOut = true;
+    controller.abort('timeout (35s)');
+  }, OVERALL_TIMEOUT_MS);
+
+  let stallTimer = null;
+  const resetStallTimer = () => {
+    if (stallTimer) clearTimeout(stallTimer);
+    stallTimer = setTimeout(() => {
+      stalled = true;
+      controller.abort('stalled (no chunk for 15s)');
+    }, STALL_TIMEOUT_MS);
+  };
+
+  resetStallTimer();
 
   try {
-    const url = `https://generativelanguage.googleapis.com/v1beta/models/${modelName}:generateContent?key=${encodeURIComponent(apiKey)}`;
+    let accumulatedText = '';
 
-    const parts = [];
+    if (provider === 'anthropic') {
+      const client = new Anthropic({ apiKey: anthropicApiKey });
+      const userContent = formatAnthropicContent(content, partialText);
 
-    const languageInstruction = content.language
-      ? `\n\nCRITICAL LANGUAGE REQUIREMENT: All headings, explanations, bullet points, and extracted terms must be written strictly in ${content.language}.`
-      : '';
-
-    const effectiveSystemPrompt = `${EXACT_SYSTEM_PROMPT}${languageInstruction}`;
-
-    if (content.text && content.text.trim()) {
-      parts.push({
-        text: `${effectiveSystemPrompt}\n\n---\nDOCUMENT / STUDY NOTES CONTENT:\n${content.text.trim()}`,
-      });
-    } else {
-      parts.push({
-        text: effectiveSystemPrompt,
-      });
-    }
-
-    if (content.images && content.images.length > 0) {
-      for (const img of content.images) {
-        if (img.data) {
-          parts.push({
-            inlineData: {
-              mimeType: img.mimeType || 'image/jpeg',
-              data: img.data.replace(/^data:[^;]+;base64,/, ''),
+      const stream = client.messages.stream(
+        {
+          model: modelName,
+          max_tokens: 3500,
+          system: effectiveSystemPrompt,
+          messages: [
+            {
+              role: 'user',
+              content: userContent,
             },
-          });
+          ],
+        },
+        { signal: controller.signal }
+      );
+
+      for await (const event of stream) {
+        if (event.type === 'content_block_delta' && event.delta?.type === 'text_delta') {
+          const text = event.delta.text;
+          if (text) {
+            resetStallTimer();
+            accumulatedText += text;
+            onChunk(text);
+          }
+        }
+      }
+    } else if (provider === 'gemini') {
+      const genAI = new GoogleGenerativeAI(geminiApiKey);
+      const model = genAI.getGenerativeModel({
+        model: modelName,
+        systemInstruction: effectiveSystemPrompt,
+        generationConfig: {
+          temperature: 0.1,
+          topP: 0.95,
+          maxOutputTokens: 3500,
+        },
+      });
+
+      const parts = formatGeminiContent(content, partialText);
+      const result = await model.generateContentStream(
+        {
+          contents: [
+            {
+              role: 'user',
+              parts,
+            },
+          ],
+        },
+        { signal: controller.signal }
+      );
+
+      for await (const chunk of result.stream) {
+        let text = '';
+        try {
+          text = chunk.text();
+        } catch {}
+        if (text) {
+          resetStallTimer();
+          accumulatedText += text;
+          onChunk(text);
         }
       }
     }
 
-    const payload = {
-      contents: [
-        {
-          role: 'user',
-          parts,
-        },
-      ],
-      generationConfig: {
-        temperature: 0.1, // Strict factual extraction, zero hallucination
-        topP: 0.95,
-        maxOutputTokens: 2500,
-      },
-    };
-
-    const response = await fetch(url, {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify(payload),
-      signal: controller.signal,
-    });
-
-    if (!response.ok) {
-      const errorJson = await response.json().catch(() => null);
-      const apiError = errorJson?.error?.message || response.statusText;
-      const suggestedModel = response.status === 404 ? extractSuggestedModel(apiError) : null;
+    if (!accumulatedText || !accumulatedText.trim()) {
       return {
-        ok: false,
-        status: response.status,
-        errorType: `HTTP ${response.status}`,
-        error: `[${modelName}] HTTP ${response.status}: ${apiError}`,
-        suggestedModel,
-      };
-    }
-
-    const data = await response.json();
-    const text = data?.candidates?.[0]?.content?.parts?.[0]?.text;
-
-    if (!text || !text.trim()) {
-      return {
-        ok: false,
-        status: 200,
-        errorType: 'Empty Content',
-        error: `[${modelName}] Empty content received from Gemini model`,
+        success: false,
+        text: '',
+        result: 'empty answer',
+        error: new Error('Empty response received from model stream'),
         suggestedModel: null,
       };
     }
 
     return {
-      ok: true,
-      text: text.trim(),
-    };
-  } catch (err) {
-    const isTimeout = err?.name === 'AbortError';
-    return {
-      ok: false,
-      status: isTimeout ? 408 : 0,
-      errorType: isTimeout ? 'Timeout (20s)' : 'Network Error',
-      error: isTimeout ? `[${modelName}] Request timed out after ${timeoutMs / 1000}s` : `[${modelName}] ${err?.message || String(err)}`,
+      success: true,
+      text: accumulatedText,
+      result: 'success',
       suggestedModel: null,
     };
-  } finally {
-    clearTimeout(timer);
-  }
-}
-
-async function callGeminiWithFallbackChain(content, apiKey) {
-  const models = getModelList();
-  const modelErrors = [];
-  const triedModels = new Set();
-
-  for (const model of models) {
-    if (triedModels.has(model)) continue;
-    triedModels.add(model);
-
-    // Attempt 1 (20s timeout per model)
-    const t0 = Date.now();
-    console.log(`[CampusSync Backend] [Model: ${model}] [Attempt 1] Starting request (timeout: 20s)...`);
-    const res1 = await callGeminiSingleAttempt(content, apiKey, model, 20000);
-    const duration1 = Date.now() - t0;
-
-    if (res1.ok) {
-      console.log(`[CampusSync Backend] [Model: ${model}] [Attempt 1] SUCCESS in ${duration1}ms`);
-      return { text: res1.text };
-    }
-
-    console.warn(`[CampusSync Backend] [Model: ${model}] [Attempt 1] FAILED in ${duration1}ms | ErrorType: ${res1.errorType} | Details: ${res1.error}`);
-    modelErrors.push(`${model} (Attempt 1): ${res1.error}`);
-
-    // If 404 suggested replacement model, attempt it
-    if (res1.status === 404 && res1.suggestedModel && !triedModels.has(res1.suggestedModel)) {
-      const suggested = res1.suggestedModel;
-      triedModels.add(suggested);
-      console.log(`[CampusSync Backend] [Model: ${model}] 404 suggested replacement model: "${suggested}". Attempting suggested model now...`);
-      const tSug = Date.now();
-      const resSug = await callGeminiSingleAttempt(content, apiKey, suggested, 20000);
-      const durationSug = Date.now() - tSug;
-
-      if (resSug.ok) {
-        console.log(`[CampusSync Backend] [Model: ${suggested}] [Suggested Attempt] SUCCESS in ${durationSug}ms`);
-        return { text: resSug.text };
-      }
-
-      console.warn(`[CampusSync Backend] [Model: ${suggested}] [Suggested Attempt] FAILED in ${durationSug}ms | ErrorType: ${resSug.errorType} | Details: ${resSug.error}`);
-      modelErrors.push(`${suggested} (Suggested): ${resSug.error}`);
-    }
-
-    // Retry once on 429 (Rate Limit) or 503 (Service Unavailable)
-    if (res1.status === 429 || res1.status === 503) {
-      console.log(`[CampusSync Backend] [Model: ${model}] Encountered HTTP ${res1.status}. Waiting 2s before retry (Attempt 2)...`);
-      await new Promise((r) => setTimeout(r, 2000));
-      const tRetry = Date.now();
-      console.log(`[CampusSync Backend] [Model: ${model}] [Attempt 2 / Retry] Starting retry (timeout: 20s)...`);
-      const resRetry = await callGeminiSingleAttempt(content, apiKey, model, 20000);
-      const durationRetry = Date.now() - tRetry;
-
-      if (resRetry.ok) {
-        console.log(`[CampusSync Backend] [Model: ${model}] [Attempt 2 / Retry] SUCCESS in ${durationRetry}ms`);
-        return { text: resRetry.text };
-      }
-
-      console.warn(`[CampusSync Backend] [Model: ${model}] [Attempt 2 / Retry] FAILED in ${durationRetry}ms | ErrorType: ${resRetry.errorType} | Details: ${resRetry.error}`);
-      modelErrors.push(`${model} (Attempt 2): ${resRetry.error}`);
-    }
-
-    console.log(`[CampusSync Backend] [Model: ${model}] Moving to next model in fallback chain...`);
-  }
-
-  console.error(`[CampusSync Backend] All Gemini models in fallback chain failed.\nErrors:\n${modelErrors.join('\n')}\nReturning hardcoded fallback response so the app never breaks.`);
-  return { text: null, allFailed: true };
-}
-
-async function runGeminiSummarizer(input) {
-  let apiKey;
-  try {
-    apiKey = getServerApiKey();
   } catch (err) {
-    console.error('[CampusSync Backend] API Key missing:', err.message);
-    return { ...HARDCODED_FALLBACK };
+    let resultType = 'error';
+    if (timedOut) {
+      resultType = 'timeout (35s)';
+    } else if (stalled) {
+      resultType = 'stalled (no chunk for 15s)';
+    } else if (err?.name === 'AbortError') {
+      resultType = 'aborted';
+    } else if (err?.status) {
+      resultType = `HTTP ${err.status}`;
+    } else {
+      resultType = err?.message || String(err);
+    }
+
+    const suggestedModel = extractSuggestedModel(err?.message);
+
+    return {
+      success: false,
+      text: '',
+      result: resultType,
+      error: err,
+      suggestedModel,
+    };
+  } finally {
+    clearTimeout(overallTimer);
+    if (stallTimer) clearTimeout(stallTimer);
+  }
+}
+
+/**
+ * Executes the multi-tier fallback chain with streaming and partial-answer continuation.
+ * Follows tiers: Claude Opus 4.8 -> Claude Sonnet 4.6 -> Gemini 3.8 Flash -> 3.7 -> 3.6.
+ * Logs backend telemetry only; user never sees model switching.
+ */
+async function callMultiModelWithContinuation(content) {
+  const requestStartTime = Date.now();
+  const anthropicKey = getAnthropicApiKey();
+  const geminiKey = getGeminiApiKey();
+
+  let partialText = '';
+  let finalStatus = 'all_failed';
+  let tiersAttempted = 0;
+
+  const languageInstruction = content.language
+    ? `\n\nCRITICAL LANGUAGE REQUIREMENT: All headings, explanations, bullet points, and extracted terms must be written strictly in ${content.language}.`
+    : '';
+  const effectiveSystemPrompt = `${EXACT_SYSTEM_PROMPT}${languageInstruction}`;
+
+  for (let i = 0; i < FALLBACK_CHAIN.length; i++) {
+    const tier = FALLBACK_CHAIN[i];
+    const tierNumber = i + 1;
+    const { provider, model } = tier;
+
+    // Check provider API key availability
+    if (provider === 'anthropic' && !anthropicKey) {
+      console.log(`[CampusSync Backend] [Tier ${tierNumber}: ${model}] Skipped silently (ANTHROPIC_API_KEY not configured).`);
+      continue;
+    }
+    if (provider === 'gemini' && !geminiKey) {
+      console.log(`[CampusSync Backend] [Tier ${tierNumber}: ${model}] Skipped silently (GEMINI_API_KEY not configured).`);
+      continue;
+    }
+
+    tiersAttempted++;
+    const tierStartTime = Date.now();
+    const isContinuation = Boolean(partialText && partialText.trim().length > 0);
+
+    console.log(
+      `[CampusSync Backend] [Tier ${tierNumber}: ${model}] START at ${new Date(tierStartTime).toISOString()} | Continuation: ${isContinuation} | Chars collected so far: ${partialText.length}`
+    );
+
+    let tierAccumulatedText = '';
+    const res = await streamSingleModel({
+      provider,
+      modelName: model,
+      content,
+      partialText,
+      effectiveSystemPrompt,
+      anthropicApiKey: anthropicKey,
+      geminiApiKey: geminiKey,
+      onChunk: (chunk) => {
+        tierAccumulatedText += chunk;
+      },
+    });
+
+    const tierEndTime = Date.now();
+    const elapsedMs = tierEndTime - tierStartTime;
+
+    if (res.success && res.text) {
+      partialText = isContinuation
+        ? joinContinuationText(partialText, res.text)
+        : res.text;
+
+      console.log(
+        `[CampusSync Backend] [Tier ${tierNumber}: ${model}] END at ${new Date(tierEndTime).toISOString()} | Elapsed: ${elapsedMs}ms | Result: success | Total chars: ${partialText.length}`
+      );
+      finalStatus = 'success';
+      break;
+    }
+
+    // Tier failed (timeout, stalled, error, or empty answer)
+    console.warn(
+      `[CampusSync Backend] [Tier ${tierNumber}: ${model}] END at ${new Date(tierEndTime).toISOString()} | Elapsed: ${elapsedMs}ms | Result: ${res.result} | Chars in tier: ${tierAccumulatedText.length} | Details: ${res.error?.message || res.result}`
+    );
+
+    // If text chunks arrived before the failure, preserve them in partialText
+    if (tierAccumulatedText.trim().length > 0) {
+      partialText = isContinuation
+        ? joinContinuationText(partialText, tierAccumulatedText)
+        : tierAccumulatedText;
+      console.log(`[CampusSync Backend] [Tier ${tierNumber}: ${model}] Preserved ${tierAccumulatedText.length} partial characters for next tier continuation.`);
+    }
+
+    // Check if error suggests a replacement model name
+    if (res.suggestedModel) {
+      console.log(`[CampusSync Backend] [Tier ${tierNumber}: ${model}] Model suggested replacement: ${res.suggestedModel}. Attempting suggested model...`);
+      const sugStartTime = Date.now();
+      let sugAccumulated = '';
+      const sugRes = await streamSingleModel({
+        provider,
+        modelName: res.suggestedModel,
+        content,
+        partialText,
+        effectiveSystemPrompt,
+        anthropicApiKey: anthropicKey,
+        geminiApiKey: geminiKey,
+        onChunk: (chunk) => {
+          sugAccumulated += chunk;
+        },
+      });
+      const sugElapsedMs = Date.now() - sugStartTime;
+      if (sugRes.success && sugRes.text) {
+        partialText = isContinuation
+          ? joinContinuationText(partialText, sugRes.text)
+          : sugRes.text;
+        console.log(`[CampusSync Backend] [Suggested: ${res.suggestedModel}] SUCCESS in ${sugElapsedMs}ms | Total chars: ${partialText.length}`);
+        finalStatus = 'success';
+        break;
+      }
+      if (sugAccumulated.trim().length > 0) {
+        partialText = joinContinuationText(partialText, sugAccumulated);
+      }
+    }
   }
 
+  const totalElapsedMs = Date.now() - requestStartTime;
+  console.log(
+    `[CampusSync Backend] Total request time: ${totalElapsedMs}ms across ${tiersAttempted} tiers attempted. Final status: ${finalStatus} | Total characters: ${partialText.length}`
+  );
+
+  return {
+    text: partialText || null,
+    allFailed: finalStatus !== 'success' && !partialText,
+  };
+}
+
+async function runSummarizerChain(input) {
   let notes = '';
   const images = [];
   const language = input?.language || input?.lang;
@@ -489,7 +717,7 @@ async function runGeminiSummarizer(input) {
   } else if (input && typeof input === 'object') {
     notes = (input.notes || input.text || input.content || '').trim();
     if (Array.isArray(input.images)) {
-      images.push(...input.images);
+      images.push(...normalizeAndValidateImages(input.images));
     }
     if (input.image) {
       if (typeof input.image === 'string') {
@@ -499,7 +727,10 @@ async function runGeminiSummarizer(input) {
           data: match ? match[2] : input.image,
         });
       } else if (typeof input.image === 'object' && input.image.data) {
-        images.push(input.image);
+        images.push({
+          mimeType: input.image.mimeType || 'image/jpeg',
+          data: input.image.data.replace(/^data:[^;]+;base64,/, ''),
+        });
       }
     }
   }
@@ -508,16 +739,17 @@ async function runGeminiSummarizer(input) {
     throw new Error('No readable notes or image provided. Please upload notes or paste text.');
   }
 
-  const { text: rawResponse, allFailed } = await callGeminiWithFallbackChain(
-    { text: notes, images, language },
-    apiKey
-  );
+  const { text: finalText, allFailed } = await callMultiModelWithContinuation({
+    text: notes,
+    images,
+    language,
+  });
 
-  if (allFailed || !rawResponse) {
+  if (allFailed || !finalText) {
     return { ...HARDCODED_FALLBACK };
   }
 
-  return parseSummaryResponse(rawResponse);
+  return parseSummaryResponse(finalText);
 }
 
 const handleSummarizeRequest = async (req, res) => {
@@ -532,10 +764,10 @@ const handleSummarizeRequest = async (req, res) => {
       return res.status(400).json({ error: 'No readable notes or image provided.' });
     }
 
-    const summary = await runGeminiSummarizer({ notes, images, image, language });
+    const summary = await runSummarizerChain({ notes, images, image, language });
     return res.status(200).json(summary);
   } catch (err) {
-    console.error('[CampusSync Backend] Summarizer error:', err.message);
+    console.error('[CampusSync Backend] Summarizer unexpected error:', err.message);
     if (err.message && err.message.includes('No readable notes')) {
       return res.status(400).json({ error: err.message });
     }

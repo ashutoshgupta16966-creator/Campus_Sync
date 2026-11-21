@@ -9,8 +9,8 @@ import { apiUrl, getApiBaseUrl } from "./api";
 export type { SummaryResult, ImageData, SummarizerInput } from "./serverSummarizer";
 export { FALLBACK_MODELS, EXACT_SYSTEM_PROMPT } from "./serverSummarizer";
 
-// Frontend timeout set to 120s (longer than backend worst-case chain of 90s+)
-const FRONTEND_REQUEST_TIMEOUT_MS = 120000;
+// Frontend timeout set to 190s (longer than backend worst-case chain of 5 tiers x 35s = 175s)
+const FRONTEND_REQUEST_TIMEOUT_MS = 190000;
 
 /**
  * Executes a fetch request with timeout protection (120s) and automatic
